@@ -54,6 +54,7 @@ class FileItemDTO(
 ):
     def __init__(self, *args, **kwargs):
         self.path = kwargs.get("path", "")
+        self.caption_path = kwargs.get("caption_path", None)
         self.dataset_config: "DatasetConfig" = kwargs.get("dataset_config", None)
         self.is_video = self.dataset_config.num_frames > 1 or self.dataset_config.auto_frame_count
         self.is_audio_model = kwargs.get("is_audio_model", False)
@@ -135,7 +136,6 @@ class FileItemDTO(
         self.dataloader_transforms = kwargs.get("dataloader_transforms", None)
         super().__init__(*args, **kwargs)
 
-        # self.caption_path: str = kwargs.get('caption_path', None)
         self.raw_caption: str = kwargs.get("raw_caption", None)
         # we scale first, then crop
         self.scale_to_width: int = kwargs.get(

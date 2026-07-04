@@ -67,6 +67,7 @@ transforms_dict = {
 }
 
 img_ext_list = ['.jpg', '.jpeg', '.png', '.webp']
+caption_prefix_delimiter = '|||'
 
 
 def standardize_images(images):
@@ -94,17 +95,27 @@ def standardize_images(images):
     return standardized_images
 
 def clean_caption(caption):
-    # this doesnt make any sense anymore in a world that is not based on comma seperated tokens
-    # # remove any newlines
-    # caption = caption.replace('\n', ', ')
-    # # remove new lines for all operating systems
-    # caption = caption.replace('\r', ', ')
-    # caption_split = caption.split(',')
-    # # remove empty strings
-    # caption_split = [p.strip() for p in caption_split if p.strip()]
-    # # join back together
-    # caption = ', '.join(caption_split)
-    return caption
+    caption = caption.replace(caption_prefix_delimiter, ',')
+    caption_split = caption.split(',')
+    caption_split = [p.strip() for p in caption_split if p.strip()]
+    return ', '.join(caption_split)
+
+
+def get_caption_prefix(caption):
+    if caption_prefix_delimiter not in caption:
+        return ''
+    prefix = caption.split(caption_prefix_delimiter, 1)[0]
+    return clean_caption(prefix).strip(' ,')
+
+
+def prepend_caption_prefix(caption, prefix):
+    caption = clean_caption(caption)
+    prefix = clean_caption(prefix).strip(' ,')
+    if prefix == '':
+        return caption
+    if caption == '':
+        return prefix
+    return f'{prefix}, {caption}'
 
 def waveform_to_stereo(waveform):
     c = waveform.shape[0]
@@ -336,7 +347,8 @@ class CaptionProcessingDTOMixin:
             # see if prompt file exists
             path_no_ext = os.path.splitext(self.path)[0]
             prompt_ext = self.dataset_config.caption_ext
-            prompt_path = path_no_ext + prompt_ext
+            default_prompt_path = path_no_ext + prompt_ext
+            prompt_path = getattr(self, 'caption_path', None) or default_prompt_path
             short_caption = None
 
             if os.path.exists(prompt_path):
@@ -344,6 +356,10 @@ class CaptionProcessingDTOMixin:
                     prompt = f.read()
                     short_caption = None
                     prompt = clean_caption(prompt)
+                    if prompt_path != default_prompt_path and os.path.exists(default_prompt_path):
+                        with open(default_prompt_path, 'r', encoding='utf-8') as base_f:
+                            base_prompt = base_f.read()
+                        prompt = prepend_caption_prefix(prompt, get_caption_prefix(base_prompt))
                     if short_caption is not None:
                         short_caption = clean_caption(short_caption)
                     
@@ -392,7 +408,7 @@ class CaptionProcessingDTOMixin:
                 return ''
 
         # get tokens
-        token_list = raw_caption.split(',')
+        token_list = [token.strip() for token in raw_caption.split(',') if token.strip()]
 
         # handle token dropout
         if self.dataset_config.token_dropout_rate > 0 and not short_caption and not self.dataset_config.cache_text_embeddings:

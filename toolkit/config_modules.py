@@ -906,6 +906,12 @@ class DatasetConfig:
         # if caption_ext doesnt start with a dot, add it
         if self.caption_ext and not self.caption_ext.startswith('.'):
             self.caption_ext = '.' + self.caption_ext
+        caption_suffixes = kwargs.get('caption_suffixes', ['_nl'])
+        if caption_suffixes is None:
+            caption_suffixes = []
+        if isinstance(caption_suffixes, str):
+            caption_suffixes = [caption_suffixes]
+        self.caption_suffixes: List[str] = [str(suffix) for suffix in caption_suffixes if suffix]
         self.random_scale: bool = kwargs.get('random_scale', False)
         self.random_crop: bool = kwargs.get('random_crop', False)
         self.resolution: int = kwargs.get('resolution', 512)

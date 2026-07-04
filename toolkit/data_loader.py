@@ -41,6 +41,25 @@ video_extensions = ['.mp4', '.avi', '.mov', '.webm', '.mkv', '.wmv', '.m4v', '.f
 audio_extensions = ['.mp3', '.wav', '.flac', '.aac', '.ogg', '.m4a']
 
 
+def get_caption_path_for_suffix(file_path: str, caption_ext: str, suffix: str):
+    path_no_ext = os.path.splitext(file_path)[0]
+    return f"{path_no_ext}{suffix}{caption_ext}"
+
+
+def expand_file_list_with_caption_suffixes(file_list: List[str], dataset_config: DatasetConfig):
+    if not dataset_config.caption_suffixes:
+        return [(file, None) for file in file_list]
+
+    expanded_file_list = []
+    for file in file_list:
+        expanded_file_list.append((file, None))
+        for suffix in dataset_config.caption_suffixes:
+            caption_path = get_caption_path_for_suffix(file, dataset_config.caption_ext, suffix)
+            if os.path.exists(caption_path):
+                expanded_file_list.append((file, caption_path))
+    return expanded_file_list
+
+
 class RescaleTransform:
     """Transform to rescale images to the range [-1, 1]."""
 
@@ -433,16 +452,17 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             elif self.is_video:
                 # only look for videos
                 extensions = video_extensions
-            file_list = [os.path.join(root, file) for root, _, files in os.walk(self.dataset_path) for file in files if file.lower().endswith(tuple(extensions)) and not file.startswith('.')]
+            file_paths = [os.path.join(root, file) for root, _, files in os.walk(self.dataset_path) for file in files if file.lower().endswith(tuple(extensions)) and not file.startswith('.')]
+            file_list = expand_file_list_with_caption_suffixes(file_paths, self.dataset_config)
         else:
             # assume json
             with open(self.dataset_path, 'r') as f:
                 self.caption_dict = json.load(f)
                 # keys are file paths
-                file_list = list(self.caption_dict.keys())
+                file_list = [(file, None) for file in self.caption_dict.keys()]
                 
         # remove items in the _controls_ folder
-        file_list = [x for x in file_list if not os.path.basename(os.path.dirname(x)) == "_controls"]
+        file_list = [x for x in file_list if not os.path.basename(os.path.dirname(x[0])) == "_controls"]
 
         if self.dataset_config.num_repeats > 1:
             # repeat the list
@@ -522,11 +542,12 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 temporal_compression = self.sd.unet.config.temporal_compression_ratio
         
         bad_count = 0
-        for file in tqdm(file_list):
+        for file, caption_path in tqdm(file_list):
             try:
                 file_item = FileItemDTO(
                     sd=self.sd,
                     path=file,
+                    caption_path=caption_path,
                     is_audio_model=self.is_audio_model,
                     dataset_config=dataset_config,
                     dataloader_transforms=self.transform,
