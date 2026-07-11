@@ -143,6 +143,10 @@ export interface TrainConfig {
   content_or_style: string;
   optimizer: string;
   lr: number;
+  lr_scheduler: string;
+  lr_scheduler_params: {
+    num_warmup_steps?: number;
+  };
   ema_config?: EMAConfig;
   dtype: string;
   unload_text_encoder: boolean;

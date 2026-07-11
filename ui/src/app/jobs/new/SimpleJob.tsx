@@ -662,6 +662,46 @@ export default function SimpleJob({
                   min={0}
                   required
                 />
+                <SelectInput
+                  label="LR Scheduler"
+                  className="pt-2"
+                  value={jobConfig.config.process[0].train.lr_scheduler}
+                  onChange={value => {
+                    setJobConfig(value, 'config.process[0].train.lr_scheduler');
+                    if (value === 'constant_with_warmup') {
+                      setJobConfig(
+                        jobConfig.config.process[0].train.lr_scheduler_params?.num_warmup_steps ?? 0,
+                        'config.process[0].train.lr_scheduler_params.num_warmup_steps',
+                      );
+                    } else {
+                      setJobConfig({}, 'config.process[0].train.lr_scheduler_params');
+                    }
+                  }}
+                  options={[
+                    { value: 'constant', label: 'Constant' },
+                    { value: 'constant_with_warmup', label: 'Constant with Warmup' },
+                    { value: 'linear', label: 'Linear' },
+                    { value: 'cosine', label: 'Cosine' },
+                    { value: 'cosine_with_restarts', label: 'Cosine with Restarts' },
+                  ]}
+                />
+                {jobConfig.config.process[0].train.lr_scheduler === 'constant_with_warmup' && (
+                  <NumberInput
+                    label="Warmup Steps"
+                    className="pt-2"
+                    value={jobConfig.config.process[0].train.lr_scheduler_params?.num_warmup_steps ?? 0}
+                    onChange={value =>
+                      setJobConfig(
+                        value,
+                        'config.process[0].train.lr_scheduler_params.num_warmup_steps',
+                      )
+                    }
+                    placeholder="eg. 100"
+                    min={0}
+                    max={jobConfig.config.process[0].train.steps}
+                    required
+                  />
+                )}
                 <NumberInput
                   label="Weight Decay"
                   className="pt-2"

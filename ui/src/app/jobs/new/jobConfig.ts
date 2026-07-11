@@ -91,6 +91,8 @@ export const defaultJobConfig: JobConfig = {
           gradient_checkpointing: true,
           noise_scheduler: 'flowmatch',
           optimizer: 'adamw8bit',
+          lr_scheduler: 'constant',
+          lr_scheduler_params: {},
           timestep_type: 'sigmoid',
           content_or_style: 'balanced',
           optimizer_params: {
@@ -194,6 +196,15 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
       ...existingWeights,
     };
   }
+
+  const trainConfig = jobConfig.config.process[0].train;
+  if (!trainConfig.lr_scheduler) {
+    trainConfig.lr_scheduler = 'constant';
+  }
+  if (!trainConfig.lr_scheduler_params) {
+    trainConfig.lr_scheduler_params = {};
+  }
+
   if (isMac()) {
     jobConfig.config.process[0].device = 'mps';
   }
