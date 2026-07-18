@@ -1,6 +1,11 @@
 import torch
 from typing import Optional
-from diffusers.optimization import SchedulerType, TYPE_TO_SCHEDULER_FUNCTION, get_constant_schedule_with_warmup
+from diffusers.optimization import (
+    SchedulerType,
+    TYPE_TO_SCHEDULER_FUNCTION,
+    get_constant_schedule_with_warmup,
+    get_cosine_schedule_with_warmup,
+)
 
 
 def get_lr_scheduler(
@@ -13,6 +18,27 @@ def get_lr_scheduler(
             kwargs['T_max'] = kwargs.pop('total_iters')
         return torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer, **kwargs
+        )
+    elif name == "cosine_with_warmup":
+        if 'num_warmup_steps' not in kwargs:
+            print("WARNING: num_warmup_steps not in kwargs. Using default value of 1000")
+            kwargs['num_warmup_steps'] = 1000
+
+        num_training_steps = kwargs.pop('num_training_steps', None)
+        if num_training_steps is None:
+            num_training_steps = kwargs.pop('total_iters', None)
+        else:
+            kwargs.pop('total_iters', None)
+
+        if num_training_steps is None:
+            raise ValueError(
+                "cosine_with_warmup requires total_iters or num_training_steps"
+            )
+
+        return get_cosine_schedule_with_warmup(
+            optimizer,
+            num_training_steps=num_training_steps,
+            **kwargs,
         )
     elif name == "cosine_with_restarts":
         if 'total_iters' in kwargs:
@@ -40,7 +66,7 @@ def get_lr_scheduler(
         if 'num_warmup_steps' not in kwargs:
             print(f"WARNING: num_warmup_steps not in kwargs. Using default value of 1000")
             kwargs['num_warmup_steps'] = 1000
-        del kwargs['total_iters']
+        kwargs.pop('total_iters', None)
         return get_constant_schedule_with_warmup(optimizer, **kwargs)
     else:
         # try to use a diffusers scheduler
@@ -53,5 +79,6 @@ def get_lr_scheduler(
             print(e)
             pass
         raise ValueError(
-            "Scheduler must be cosine, cosine_with_restarts, step, linear or constant"
+            "Scheduler must be cosine, cosine_with_warmup, cosine_with_restarts, "
+            "step, linear, constant_with_warmup or constant"
         )
