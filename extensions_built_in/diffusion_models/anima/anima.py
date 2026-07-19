@@ -13,6 +13,7 @@ from toolkit.memory_management import MemoryManager
 from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+from toolkit.util.cosmos_rope import install_dynamic_cosmos_rope
 from toolkit.util.quantize import get_qtype, quantize, quantize_model
 
 try:
@@ -264,6 +265,9 @@ class AnimaModel(BaseModel):
 
         transformer = pipe.transformer
         text_conditioner = pipe.text_conditioner
+        # Aspect-ratio buckets can exceed diffusers' fixed Cosmos RoPE sequence
+        # length even when their total pixel area is within the training target.
+        install_dynamic_cosmos_rope(transformer)
 
         if self.model_config.quantize:
             self.print_and_status_update("Quantizing Transformer")
