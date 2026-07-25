@@ -546,6 +546,12 @@ export default function SimpleJob({
                 )}
               </>
             )}
+            <Checkbox
+              label="Transformer Only"
+              checked={jobConfig.config.process[0].network?.transformer_only ?? true}
+              onChange={value => setJobConfig(value, 'config.process[0].network.transformer_only')}
+              docKey="network.transformer_only"
+            />
           </Card>
           {!disableSections.includes('slider') && (
             <Card title="Slider">

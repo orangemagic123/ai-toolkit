@@ -52,6 +52,15 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'network.transformer_only': {
+    title: 'Transformer Only',
+    description: (
+      <>
+        Limits the training adapter to the model&apos;s transformer blocks. Disable this to target all otherwise eligible
+        layers in the denoising model. This can increase the number of trainable parameters and memory usage.
+      </>
+    ),
+  },
   'datasets.control_path': {
     title: 'Control Dataset',
     description: (
