@@ -69,6 +69,7 @@ export const defaultJobConfig: JobConfig = {
           conv_alpha: 16,
           lokr_full_rank: true,
           lokr_factor: -1,
+          transformer_only: true,
           network_kwargs: {
             ignore_if_contains: [],
           },
