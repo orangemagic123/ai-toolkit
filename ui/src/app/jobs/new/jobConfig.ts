@@ -63,6 +63,7 @@ export const defaultJobConfig: JobConfig = {
         performance_log_every: 10,
         network: {
           type: 'lora',
+          use_dora: false,
           linear: 32,
           linear_alpha: 32,
           conv: 16,
@@ -143,6 +144,17 @@ export const defaultJobConfig: JobConfig = {
 };
 
 export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
+  const network = jobConfig?.config?.process?.[0]?.network;
+  if (network) {
+    const legacyDora = network.type?.toLowerCase() === 'dora';
+    if (legacyDora) {
+      network.type = 'lora';
+    }
+    if (network.use_dora === undefined) {
+      network.use_dora = legacyDora;
+    }
+  }
+
   // upgrade prompt strings to samples
   if (
     jobConfig?.config?.process &&

@@ -62,6 +62,7 @@ export interface GPUApiResponse {
 
 export interface NetworkConfig {
   type: string;
+  use_dora?: boolean;
   linear: number;
   linear_alpha: number;
   conv: number;

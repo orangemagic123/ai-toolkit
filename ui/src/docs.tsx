@@ -61,6 +61,16 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'network.use_dora': {
+    title: 'Use DoRA',
+    description: (
+      <>
+        Applies weight decomposition to the selected adapter type. It can be combined with either LoRA or LoKr. The
+        current LoRA DoRA implementation targets linear layers only, while LoKr DoRA can also target convolutional
+        layers.
+      </>
+    ),
+  },
   'datasets.control_path': {
     title: 'Control Dataset',
     description: (

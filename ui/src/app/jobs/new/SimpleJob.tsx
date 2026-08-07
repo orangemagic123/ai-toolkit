@@ -220,6 +220,10 @@ export default function SimpleJob({
   }, [modelArch]);
 
   const showGPUSelect = !isMac();
+  const configuredNetworkType = jobConfig.config.process[0].network?.type ?? 'lora';
+  const isLegacyDora = configuredNetworkType.toLowerCase() === 'dora';
+  const networkType = isLegacyDora ? 'lora' : configuredNetworkType;
+  const useDora = jobConfig.config.process[0].network?.use_dora ?? isLegacyDora;
 
   let numDatasetCols = 4;
   let numSampleTopCols = 4;
@@ -494,14 +498,25 @@ export default function SimpleJob({
           <Card title="Target">
             <SelectInput
               label="Target Type"
-              value={jobConfig.config.process[0].network?.type ?? 'lora'}
+              value={networkType}
               onChange={value => setJobConfig(value, 'config.process[0].network.type')}
               options={[
                 { value: 'lora', label: 'LoRA' },
                 { value: 'lokr', label: 'LoKr' },
               ]}
             />
-            {jobConfig.config.process[0].network?.type == 'lokr' && (
+            <Checkbox
+              label="Use DoRA"
+              checked={useDora}
+              onChange={value => {
+                setJobConfig(value, 'config.process[0].network.use_dora');
+                if (isLegacyDora) {
+                  setJobConfig('lora', 'config.process[0].network.type');
+                }
+              }}
+              docKey="network.use_dora"
+            />
+            {networkType == 'lokr' && (
               <SelectInput
                 label="LoKr Factor"
                 value={`${jobConfig.config.process[0].network?.lokr_factor ?? -1}`}
@@ -515,7 +530,7 @@ export default function SimpleJob({
                 ]}
               />
             )}
-            {jobConfig.config.process[0].network?.type == 'lora' && (
+            {networkType == 'lora' && (
               <>
                 <NumberInput
                   label="Linear Rank"
@@ -530,7 +545,7 @@ export default function SimpleJob({
                   max={1024}
                   required
                 />
-                {disableSections.includes('network.conv') ? null : (
+                {!useDora && !disableSections.includes('network.conv') ? (
                   <NumberInput
                     label="Conv Rank"
                     value={jobConfig.config.process[0].network.conv}
@@ -543,7 +558,7 @@ export default function SimpleJob({
                     min={0}
                     max={1024}
                   />
-                )}
+                ) : null}
               </>
             )}
             <Checkbox

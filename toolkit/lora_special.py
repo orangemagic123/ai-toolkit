@@ -346,6 +346,18 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
             is_lorm=is_lorm,
             **kwargs
         )
+        self.network_config: NetworkConfig = kwargs.get("network_config", None)
+        requested_network_type = network_type.lower()
+        self.use_dora = (
+            requested_network_type == "dora"
+            or bool(getattr(self.network_config, "use_dora", False))
+            or bool(kwargs.get("use_dora", kwargs.get("weight_decompose", kwargs.get("dora_wd", False))))
+        )
+        # Keep DoRA independent from the adapter factorization. `dora` remains
+        # accepted as a legacy alias for LoRA + DoRA.
+        self.network_type = "lora" if requested_network_type == "dora" else network_type
+        if self.use_dora:
+            self.can_merge_in = False
         if ignore_if_contains is None:
             ignore_if_contains = []
         self.ignore_if_contains = ignore_if_contains
@@ -383,17 +395,15 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
         self.is_auraflow = is_auraflow
         self.is_flux = is_flux
         self.is_lumina2 = is_lumina2
-        self.network_type = network_type
         self.is_assistant_adapter = is_assistant_adapter
-        self.full_rank = network_type.lower() == "fullrank"
+        self.full_rank = self.network_type.lower() == "fullrank"
         self.is_ara = is_ara
-        if self.network_type.lower() == "dora":
-            self.module_class = DoRAModule
-            module_class = DoRAModule
-        elif self.network_type.lower() == "lokr":
+        if self.network_type.lower() == "lokr":
             self.module_class = LokrModule
             module_class = LokrModule
-        self.network_config: NetworkConfig = kwargs.get("network_config", None)
+        elif self.use_dora:
+            self.module_class = DoRAModule
+            module_class = DoRAModule
 
         self.peft_format = peft_format
         self.is_transformer = is_transformer
@@ -511,6 +521,11 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                         if any([word in clean_name for word in self.ignore_if_contains]):
                             skip = True
 
+                        # The custom LoRA DoRA module currently supports Linear only.
+                        # LoKr has its own weight-decomposition path and supports Conv2d.
+                        if self.use_dora and self.network_type.lower() == "lora" and is_conv2d:
+                            skip = True
+
                         # see if it is over threshold
                         if count_parameters(child_module) < parameter_threshold:
                             skip = True
@@ -587,6 +602,7 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                             
                             if self.network_type.lower() == "lokr":
                                 module_kwargs["factor"] = self.network_config.lokr_factor
+                                module_kwargs["weight_decompose"] = self.use_dora
                             
                             if self.is_ara:
                                 module_kwargs["is_ara"] = True
