@@ -91,6 +91,7 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
         decompose_both=False,
         network: 'LoRASpecialNetwork' = None,
         factor: int = -1,  # factorization factor
+        weight_decompose: bool = False,
         **kwargs,
     ):
         """ if alpha == 0 or None, alpha is rank (no scaling). """
@@ -102,7 +103,9 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
         self.cp = False
         self.use_w1 = False
         self.use_w2 = False
-        self.can_merge_in = True
+        self.weight_decompose = bool(weight_decompose)
+        self.can_merge_in = not self.weight_decompose
+        self.org_module = [org_module]
         # only the plain Linear path (no cp/Conv2d) gets the factorized forward;
         # Conv2d and the cp branch keep using get_weight()/make_kron() below.
         self._fast_linear = False
@@ -172,7 +175,10 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
             # stash factor pair for the factorized (no full-kron) forward path
             self._in_m, self._in_n = in_m, in_n
             self._out_l, self._out_k = out_l, out_k
-            self._fast_linear = True
+            # DoRA needs the norm of the fully adapted weight. Keep its Linear
+            # path on the exact full-weight implementation until the norm can be
+            # computed directly from the factors.
+            self._fast_linear = not self.weight_decompose
 
             # smaller part. weight scale
             if decompose_both and lora_dim < max(shape[0][0], shape[1][0])/2:
@@ -215,6 +221,15 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
         self.scale = float(alpha) / self.lora_dim
         self.register_buffer('alpha', torch.tensor(alpha))  # treat as constant
 
+        if self.weight_decompose:
+            org_weight = self.get_orig_weight(torch.device('cpu')).float()
+            self.dora_norm_dims = org_weight.dim() - 1
+            magnitude = torch.linalg.vector_norm(
+                org_weight.reshape(org_weight.shape[0], -1),
+                dim=1,
+            ).reshape(org_weight.shape[0], *([1] * self.dora_norm_dims))
+            self.dora_scale = nn.Parameter(magnitude, requires_grad=True)
+
         if self.use_w2:
             torch.nn.init.constant_(self.lokr_w2, 0)
         else:
@@ -230,7 +245,6 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
             torch.nn.init.kaiming_uniform_(self.lokr_w1_b, a=math.sqrt(5))
 
         self.multiplier = multiplier
-        self.org_module = [org_module]
         weight = make_kron(
             self.lokr_w1 if self.use_w1 else self.lokr_w1_a@self.lokr_w1_b,
             (self.lokr_w2 if self.use_w2
@@ -328,6 +342,20 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
                 return self.org_module[0].bias.data.detach()
         return None
 
+    def apply_weight_decompose(self, weight, multiplier):
+        output_dtype = weight.dtype
+        weight = weight.to(self.dora_scale.dtype)
+        weight_norm = torch.linalg.vector_norm(
+            weight.reshape(weight.shape[0], -1),
+            dim=1,
+        ).reshape(weight.shape[0], *([1] * self.dora_norm_dims))
+        weight_norm = weight_norm.detach().clamp_min(torch.finfo(weight.dtype).eps)
+        magnitude_scale = self.dora_scale.to(weight.device) / weight_norm
+        # Interpolate both direction and magnitude so a zero network multiplier
+        # remains exactly the base model.
+        magnitude_scale = 1 + multiplier * (magnitude_scale - 1)
+        return (weight * magnitude_scale).to(output_dtype)
+
     def _get_delta_factors(self):
         """(A, w2_or_w2a, w2_b_or_None) without ever combining the two kron
         factors into a full-size matrix."""
@@ -397,7 +425,7 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
         return (base_out + delta).to(orig_dtype)
 
     def _call_forward(self, x):
-        if self._fast_linear:
+        if self._fast_linear and not self.weight_decompose:
             return self._call_forward_fast_linear(x)
 
         # legacy path: Conv2d / cp branch. Still materializes the full kron
@@ -421,6 +449,8 @@ class LokrModule(ToolkitModuleMixin, nn.Module):
             orig_weight
             + lokr_weight * multiplier
         )
+        if self.weight_decompose:
+            weight = self.apply_weight_decompose(weight, multiplier)
         bias = self.get_orig_bias(x.device)
         if bias is not None:
             bias = bias.to(weight.device, dtype=weight.dtype)

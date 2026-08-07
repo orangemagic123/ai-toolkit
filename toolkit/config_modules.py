@@ -186,12 +186,23 @@ class LoRMConfig:
         })
 
 
-NetworkType = Literal['lora', 'locon', 'lorm', 'lokr']
+NetworkType = Literal['lora', 'dora', 'locon', 'lorm', 'lokr']
 
 
 class NetworkConfig:
     def __init__(self, **kwargs):
-        self.type: NetworkType = kwargs.get('type', 'lora')
+        requested_type: NetworkType = kwargs.get('type', 'lora')
+        normalized_type = requested_type.lower()
+        # `type: dora` was the original way to enable DoRA. Keep accepting it,
+        # but normalize to an independent modifier so it can also be used with LoKr.
+        self.type: NetworkType = 'lora' if normalized_type == 'dora' else normalized_type
+        legacy_use_dora = normalized_type == 'dora'
+        self.use_dora: bool = kwargs.get(
+            'use_dora',
+            kwargs.get('weight_decompose', kwargs.get('dora_wd', legacy_use_dora)),
+        )
+        if self.use_dora and self.type not in ('lora', 'lokr'):
+            raise ValueError(f"DoRA is only supported with LoRA or LoKr, got {self.type}")
         rank = kwargs.get('rank', None)
         linear = kwargs.get('linear', None)
         if rank is not None:

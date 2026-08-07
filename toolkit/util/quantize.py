@@ -276,15 +276,15 @@ def quantize_model(
         
         network_config = {
             "type": "lora",
+            "use_dora": any(
+                key.endswith(".dora_scale") or key.endswith(".magnitude")
+                for key in lora_state_dict
+            ),
             "network_kwargs": {"only_if_contains": []},
             "transformer_only": False,
         }
-        first_key = list(lora_state_dict.keys())[0]
-        first_weight = lora_state_dict[first_key]
-        # if it starts with lycoris and includes lokr
-        if first_key.startswith("lycoris") and any(
-            "lokr" in key for key in lora_state_dict.keys()
-        ):
+        # LoKr may use either the legacy `lycoris_` prefix or PEFT-style keys.
+        if any("lokr_" in key for key in lora_state_dict):
             network_config["type"] = "lokr"
         
         network_kwargs = {}

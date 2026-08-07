@@ -633,6 +633,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
         else:
             if self.network is not None and self.train_config.merge_network_on_save:
                 # merge the network weights into a full model and save that.
+                if getattr(self.network, 'use_dora', False):
+                    raise ValueError(
+                        "DoRA networks cannot be merged into a full model on save. "
+                        "Disable merge_network_on_save and save the adapter instead."
+                    )
                 # torchao quantized weights can be force merged here (dequantize -> merge -> re-quantize)
                 # even though can_merge_in is False (kept False so sampling never merges). quanto and
                 # layer_offloading still cannot merge.

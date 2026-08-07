@@ -521,7 +521,7 @@ class ToolkitNetworkMixin:
             keymap = get_lora_keymap_from_model_keymap(keymap)
 
         # upgrade keymaps for DoRA
-        if self.network_type.lower() == 'dora':
+        if getattr(self, 'use_dora', self.network_type.lower() == 'dora') and self.network_type.lower() != 'lokr':
             if keymap is not None:
                 new_keymap = {}
                 for ldm_key, diffusers_key in keymap.items():
@@ -648,6 +648,16 @@ class ToolkitNetworkMixin:
         if self.base_model_ref is not None:
             weights_sd = self.base_model_ref().convert_lora_weights_before_load(weights_sd)
 
+        has_dora_weights = any(
+            key.endswith('.dora_scale') or key.endswith('.magnitude')
+            for key in weights_sd
+        )
+        if has_dora_weights and not getattr(self, 'use_dora', False):
+            raise ValueError(
+                "The adapter contains DoRA weights, but use_dora is disabled. "
+                "Set network.use_dora to true before loading it."
+            )
+
         load_sd = OrderedDict()
         for key, value in weights_sd.items():
             load_key = keymap[key] if key in keymap else key
@@ -678,8 +688,10 @@ class ToolkitNetworkMixin:
                 if self.network_type.lower() == "lokr":
                     load_key = load_key.replace('$$lokr_w1', '.lokr_w1')
                     load_key = load_key.replace('$$lokr_w2', '.lokr_w2')
+                    load_key = load_key.replace('$$dora_scale', '.dora_scale')
                     if load_key.endswith('$$alpha'):
                         load_key = load_key[:-7] + '.alpha'
+                load_key = load_key.replace('$$magnitude', '.magnitude')
             
             if self.network_type.lower() == "lokr":
                 # lora_transformer_transformer_blocks_7_attn_to_v.lokr_w1 to lycoris_transformer_blocks_7_attn_to_v.lokr_w1
@@ -853,7 +865,7 @@ class ToolkitNetworkMixin:
             module.reset_weights()
 
     def merge_in(self, merge_weight=1.0):
-        if self.network_type.lower() == 'dora':
+        if getattr(self, 'use_dora', self.network_type.lower() == 'dora'):
             return
         self.is_merged_in = True
         for module in self.get_all_modules():
