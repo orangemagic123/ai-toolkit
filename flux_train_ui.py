@@ -14,6 +14,7 @@ import uuid
 import os
 import shutil
 import json
+from copy import deepcopy
 from collections import deque
 from queue import Empty, Full, Queue
 from threading import Event, Thread
@@ -283,6 +284,10 @@ def start_training(
         more_advanced_options_dict = yaml.safe_load(more_advanced_options)
         config["config"]["process"][0] = recursive_update(config["config"]["process"][0], more_advanced_options_dict)
         print(config)
+
+    # The trainer copies top-level `meta` entries into the saved safetensors file.
+    # Capture the final process config so UI values and advanced overrides are both recorded.
+    config.setdefault("meta", {})["training_config"] = deepcopy(config["config"]["process"][0])
     
     # Save the updated config
     # generate a random name for the config
