@@ -379,7 +379,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
     def update_training_metadata(self):
         o_dict = OrderedDict({
-            "training_info": self.get_training_info()
+            "training_info": self.get_training_info(),
+            "training_config": copy.deepcopy(self.raw_process_config),
         })
         o_dict['ss_base_model_version'] = self.sd.get_base_model_version()
 
