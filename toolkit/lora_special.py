@@ -8,12 +8,13 @@ import sys
 from typing import List, Optional, Dict, Type, Union
 import torch
 from diffusers import UNet2DConditionModel, PixArtTransformer2DModel, AuraFlowTransformer2DModel, WanTransformer3DModel
+from optimum.quanto import QTensor
 from transformers import CLIPTextModel
 from toolkit.models.lokr import LokrModule
 
 from .config_modules import NetworkConfig
 from .lorm import count_parameters
-from .network_mixins import ToolkitNetworkMixin, ToolkitModuleMixin, ExtractableModuleMixin
+from .network_mixins import ToolkitNetworkMixin, ToolkitModuleMixin, ExtractableModuleMixin, broadcast_and_multiply
 
 from toolkit.kohya_lora import LoRANetwork
 from toolkit.models.DoRA import DoRAModule
@@ -133,6 +134,58 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.org_forward = self.org_module[0].forward
         self.org_module[0].forward = self.forward
         # del self.org_module
+
+    def forward(self, x, *args, **kwargs):
+        network = self.network_ref()
+        if (
+            network.is_lorm
+            or not network.is_active
+            or network.is_merged_in
+            or network._multiplier == 0
+        ):
+            return ToolkitModuleMixin.forward(self, x, *args, **kwargs)
+
+        org_forwarded = self.org_forward(x, *args, **kwargs)
+
+        if isinstance(x, QTensor):
+            x = x.dequantize()
+
+        compute_dtype = org_forwarded.dtype
+        use_mixed_precision = (
+            (x.device.type == "cuda" and compute_dtype in (torch.float16, torch.bfloat16))
+            or (x.device.type == "cpu" and compute_dtype == torch.bfloat16)
+        )
+
+        if use_mixed_precision:
+            # Keep large activations in the base model's compute dtype while
+            # retaining FP32 master parameters and gradients for the adapter.
+            lora_input = x if x.dtype == compute_dtype else x.to(compute_dtype)
+            with torch.autocast(device_type=x.device.type, dtype=compute_dtype):
+                lora_output = self._call_forward(lora_input)
+        else:
+            lora_input = x.to(self.lora_down.weight.dtype)
+            lora_output = self._call_forward(lora_input)
+
+        multiplier = network.torch_multiplier.to(
+            device=lora_output.device,
+            dtype=lora_output.dtype,
+        )
+        lora_output_batch_size = lora_output.size(0)
+        multiplier_batch_size = multiplier.size(0)
+        if lora_output_batch_size != multiplier_batch_size:
+            num_interleaves = lora_output_batch_size // multiplier_batch_size
+            multiplier = multiplier.repeat_interleave(num_interleaves)
+
+        scaled_lora_output = broadcast_and_multiply(lora_output, multiplier)
+        scaled_lora_output = scaled_lora_output.to(org_forwarded.dtype)
+
+        try:
+            return org_forwarded + scaled_lora_output
+        except RuntimeError as e:
+            print(e)
+            print(org_forwarded.size())
+            print(scaled_lora_output.size())
+            raise e
 
 
 def _is_quantized_tensor(t) -> bool:
@@ -776,5 +829,4 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 all_params.append({"lr": unet_lr, "params": list(self.unet_conv_out.parameters())})
 
         return all_params
-
 
