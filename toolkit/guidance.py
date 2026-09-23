@@ -180,7 +180,7 @@ def get_targeted_polarity_loss(
     loss = pred_loss + pred_neg_loss
 
     loss = loss.mean()
-    loss.backward()
+    (loss * kwargs.get("loss_scale", 1.0)).backward()
 
     # detach it so parent class can run backward on no grads without throwing error
     loss = loss.detach()
@@ -265,7 +265,7 @@ def get_direct_guidance_loss(
     # loss = guidance_loss + masked_noise_loss
     loss = guidance_loss
 
-    loss.backward()
+    (loss * kwargs.get("loss_scale", 1.0)).backward()
 
     # detach it so parent class can run backward on no grads without throwing error
     loss = loss.detach()
@@ -390,7 +390,7 @@ def get_targeted_guidance_loss(
     positive_loss = positive_loss.mean() + polar_loss.mean()
 
 
-    positive_loss.backward()
+    (positive_loss * kwargs.get("loss_scale", 1.0)).backward()
     # loss = positive_loss.detach() + negative_loss.detach()
     loss = positive_loss.detach()
 
@@ -506,9 +506,9 @@ def get_guided_loss_polarity(
     loss = loss.mean([1, 2, 3])
     loss = loss.mean()
     if scaler is not None:
-        scaler.scale(loss).backward()
+        scaler.scale(loss * kwargs.get("loss_scale", 1.0)).backward()
     else:
-        loss.backward()
+        (loss * kwargs.get("loss_scale", 1.0)).backward()
 
     # detach it so parent class can run backward on no grads without throwing error
     loss = loss.detach()
@@ -601,7 +601,7 @@ def get_guided_tnt(
 
     loss = loss.mean()
 
-    loss.backward()
+    (loss * kwargs.get("loss_scale", 1.0)).backward()
 
     # detach it so parent class can run backward on no grads without throwing error
     loss = loss.detach()
