@@ -273,6 +273,8 @@ class ExponentialMovingAverage:
         # https://pytorch.org/tutorials/beginner/saving_loading_models.html#what-is-a-state-dict
         return {
             "decay": self.decay,
+            "use_feedback": self.use_feedback,
+            "param_multiplier": self.param_multiplier,
             "num_updates": self.num_updates,
             "shadow_params": self.shadow_params,
             "collected_params": self.collected_params
@@ -290,6 +292,9 @@ class ExponentialMovingAverage:
         self.decay = state_dict["decay"]
         if self.decay < 0.0 or self.decay > 1.0:
             raise ValueError('Decay must be between 0 and 1')
+        self.use_feedback = state_dict.get("use_feedback", self.use_feedback)
+        self.param_multiplier = state_dict.get("param_multiplier", self.param_multiplier)
+        self._is_train_mode = True
         self.num_updates = state_dict["num_updates"]
         assert self.num_updates is None or isinstance(self.num_updates, int), \
             "Invalid num_updates"

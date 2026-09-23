@@ -1,3 +1,4 @@
+from toolkit.util.cache_identity import source_identity
 import base64
 import glob
 import hashlib
@@ -1786,6 +1787,9 @@ class LatentCachingFileItemDTOMixin:
     def get_latent_info_dict(self: 'FileItemDTO'):
         item = OrderedDict([
             ("filename", os.path.basename(self.path)),
+            ("source", source_identity(self.path)),
+            ("encoder", self.latent_cache_identity),
+            ("standardize_images", getattr(self.dataset_config, "standardize_images", False)),
             ("scale_to_width", self.scale_to_width),
             ("scale_to_height", self.scale_to_height),
             ("crop_x", self.crop_x),
@@ -2007,12 +2011,15 @@ class TextEmbeddingFileItemDTOMixin:
             self.load_caption()
         item = OrderedDict([
             ("caption", self.caption),
+            ("encoder", self.text_cache_identity),
             ("text_embedding_space_version", self.text_embedding_space_version),
             ("text_embedding_version", self.text_embedding_version),
         ])
         # if we have a control image, cache the path
         if self.encode_control_in_text_embeddings and self.control_path is not None:
             item["control_path"] = self.control_path
+            item["control_source"] = source_identity(self.control_path)
+            item["control_crop"] = self.get_latent_info_dict()
         return item
 
     def get_text_embedding_path(self: 'FileItemDTO', recalculate=False):

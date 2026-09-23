@@ -201,6 +201,10 @@ class AnimaTrainableModel(torch.nn.Module):
     def forward(self, *args, **kwargs):
         return self.transformer(*args, **kwargs)
 
+    def set_attention_backend(self, backend, **kwargs):
+        for module in (self.transformer, self.text_conditioner):
+            module.set_attention_backend(backend, **kwargs)
+
     def enable_gradient_checkpointing(self):
         for module in (self.transformer, self.text_conditioner):
             if hasattr(module, "enable_gradient_checkpointing"):
@@ -249,7 +253,7 @@ class AnimaModel(BaseModel):
 
     @property
     def trainable_model(self) -> AnimaTrainableModel:
-        return self.model
+        return unwrap_model(self.model)
 
     def load_model(self):
         dtype = self.torch_dtype
@@ -491,7 +495,7 @@ class AnimaModel(BaseModel):
             dtype=self.torch_dtype,
         )
 
-        noise_pred = self.trainable_model.transformer(
+        noise_pred = self.model(
             hidden_states=latent_model_input,
             timestep=timestep,
             encoder_hidden_states=prompt_embeds,
@@ -601,9 +605,9 @@ class AnimaModel(BaseModel):
         return "anima"
 
     def get_transformer_block_names(self) -> Optional[List[str]]:
-        block_names = ["transformer_blocks"]
+        block_names = ["transformer.transformer_blocks"]
         if self.train_text_conditioner:
-            block_names.append("text_conditioner")
+            block_names.append("text_conditioner.blocks")
         return block_names
 
     def get_model_to_train(self):

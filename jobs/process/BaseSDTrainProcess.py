@@ -1,3 +1,7 @@
+from toolkit.util.training_state import (
+    save_training_state, load_training_state, restore_training_parameters,
+    restore_training_gradients, remove_training_state,
+)
 import copy
 import glob
 import inspect
@@ -101,6 +105,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
         self.last_save_step = 0
         # start at 1 so we can do a sample at the start
         self.grad_accumulation_step = 1
+        self._accumulated_samples = 0
+        self._accumulation_microsteps = 0
+        self._epoch_batches_seen = 0
+        self._resume_checkpoint_path = None
+        self._completed_steps = 0
         # if true, then we do not do an optimizer step. We are accumulating gradients
         self.is_grad_accumulation_step = False
         self.device = str(self.accelerator.device)
@@ -111,6 +120,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         else:
             self.network_config = None
         self.train_config = TrainConfig(**self.get_conf('train', {}))
+        if self.train_config.ema_config.use_ema and self.train_config.merge_network_on_save:
+            raise ValueError(
+                'EMA cannot be combined with merge_network_on_save, which permanently resets training weights'
+            )
         model_config = self.get_conf('model', {})
         self.modules_being_trained: List[torch.nn.Module] = []
 
@@ -477,6 +490,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     shutil.rmtree(item)
                 else:
                     os.remove(item)
+                remove_training_state(item)
                 # see if a yaml file with same name exists
                 yaml_file = os.path.splitext(item)[0] + ".yaml"
                 if os.path.exists(yaml_file):
@@ -499,10 +513,39 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if not self.accelerator.is_main_process:
             return
         flush()
-        if self.ema is not None:
-            # always save params as ema
-            self.ema.eval()
+        previous_multiplier = self.network.multiplier if self.network is not None else None
+        try:
+            if self.ema is not None:
+                self.ema.eval()
+            checkpoint_paths = self._save_model(step)
+        finally:
+            # Failed exports must not leave EMA weights installed for subsequent training.
+            if self.ema is not None:
+                self.ema.train()
+            if self.network is not None:
+                self.network.multiplier = previous_multiplier
 
+        if self.optimizer is not None:
+            progress = {
+                "step": self._completed_steps,
+                "epoch": self.epoch_num,
+                "accumulated_samples": self._accumulated_samples,
+                # This is the number of microsteps already completed in this window.
+                "accumulation_step": self._accumulation_microsteps,
+                "epoch_batches_seen": self._epoch_batches_seen,
+            }
+            for checkpoint in checkpoint_paths:
+                save_training_state(
+                    checkpoint, self.optimizer, self.ema, self.lr_scheduler,
+                    getattr(self.accelerator, "scaler", None), progress,
+                )
+        self.clean_up_saves()
+        for checkpoint in checkpoint_paths:
+            self.post_save_hook(checkpoint)
+        flush()
+
+    def _save_model(self, step=None):
+        checkpoint_paths = []
         if not os.path.exists(self.save_root):
             os.makedirs(self.save_root, exist_ok=True)
 
@@ -546,6 +589,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     metadata=save_meta,
                     extra_state_dict=embedding_dict
                 )
+                checkpoint_paths.append(file_path)
                 self.network.multiplier = prev_multiplier
                 # if we have an embedding as well, pair it with the network
 
@@ -561,6 +605,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # replace extension
                     emb_file_path = os.path.splitext(emb_file_path)[0] + ".pt"
                 self.embedding.save(emb_file_path)
+                checkpoint_paths.append(emb_file_path)
             
             if self.decorator is not None:
                 dec_filename = f'{self.job.name}{step_num}.safetensors'
@@ -574,6 +619,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     dec_file_path,
                     metadata=save_meta,
                 )
+                checkpoint_paths.append(dec_file_path)
 
             if self.adapter is not None and self.adapter_config.train:
                 adapter_name = self.job.name
@@ -631,6 +677,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         dtype=get_torch_dtype(self.save_config.dtype),
                         direct_save=direct_save
                     )
+                checkpoint_paths.append(name_or_path if self.adapter_config.type == "control_net" else file_path)
         else:
             if self.network is not None and self.train_config.merge_network_on_save:
                 # merge the network weights into a full model and save that.
@@ -675,12 +722,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     save_meta,
                     get_torch_dtype(self.save_config.dtype)
                 )
+                checkpoint_paths.append(file_path)
             if self.train_config.train_unet or self.train_config.train_text_encoder:
                 self.sd.save(
                     file_path,
                     save_meta,
                     get_torch_dtype(self.save_config.dtype)
                 )
+                checkpoint_paths.append(file_path)
 
         # save learnable params as json if we have thim
         if self.snr_gos:
@@ -711,12 +760,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 print_acc(e)
                 print_acc("Could not save optimizer")
 
-        self.clean_up_saves()
-        self.post_save_hook(file_path)
-
-        if self.ema is not None:
-            self.ema.train()
-        flush()
+        return list(dict.fromkeys(checkpoint_paths))
 
     # Called before the model is loaded
     def hook_before_model_load(self):
@@ -808,6 +852,25 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # otherwise params will be gathered through normal means
         return None
 
+    def is_regularization_step(self, step):
+        saving = self.save_config.save_every and step % self.save_config.save_every == 0
+        sampling = (not self.train_config.disable_sampling and self.sample_config.sample_every
+                    and step >= self.sample_config.sample_start_step
+                    and step % self.sample_config.sample_every == 0)
+        return step % 2 == 0 and self.data_loader_reg is not None and not saving and not sampling
+
+    def get_scheduler_training_steps(self):
+        steps = self.train_config.steps
+        accumulation = self.train_config.gradient_accumulation_steps
+        if accumulation != -1:
+            return (steps + accumulation - 1) // accumulation
+        if self.data_loader is None or len(self.data_loader) == 0:
+            raise ValueError("Epoch gradient accumulation requires a non-empty training dataset")
+        main_batches = sum(not self.is_regularization_step(step) for step in range(steps))
+        updates, remaining = divmod(main_batches, len(self.data_loader))
+        # A trailing regularization batch also needs a final partial-window update.
+        return updates + int(bool(remaining) or (steps > 0 and self.is_regularization_step(steps - 1)))
+
     def hook_train_loop(self, batch):
         # return loss
         return 0.0
@@ -860,11 +923,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
         return latest_path
 
     def load_training_state_from_metadata(self, path):
-        if not self.accelerator.is_main_process:
-            return
         if path is not None and self.network_config is not None and path == self.network_config.pretrained_lora_path:
             # dont load metadata from pretrained lora
             return
+        self._resume_checkpoint_path = path
         meta = None
         # if path is folder, then it is diffusers
         if os.path.isdir(path):
@@ -1913,6 +1975,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 # load last saved weights
                 if latest_save_path is not None:
                     self.embedding.load_embedding_from_file(latest_save_path, self.device_torch)
+                    self._resume_checkpoint_path = latest_save_path
                     if self.embedding.step > 1:
                         self.step_num = self.embedding.step
                         self.start_step = self.step_num
@@ -2021,10 +2084,26 @@ class BaseSDTrainProcess(BaseTrainProcess):
             # only works for adafactor, but it should have thrown an error prior to this otherwise
             self.optimizer.enable_paramiter_swapping(self.train_config.paramiter_swapping_factor)
 
-        # check if it exists
+        resume_state = None
+        if self._resume_checkpoint_path is not None:
+            resume_state = load_training_state(self._resume_checkpoint_path)
+        if resume_state is not None and self.network is not None and self.network.did_change_weights:
+            print_acc("Network shape changed; starting fresh optimizer/EMA state")
+            resume_state = None
+        if resume_state is not None:
+            restore_training_parameters(resume_state, optimizer)
+            if self.train_config.start_step is None:
+                self.step_num = resume_state["progress"]["step"]
+                self.start_step = self.step_num
+                self.epoch_num = resume_state["progress"]["epoch"]
+            print_acc(f"Restored training weights and optimizer paired with {self._resume_checkpoint_path}")
+        elif self._resume_checkpoint_path is not None and self.train_config.ema_config.use_ema:
+            print_acc("WARNING: Legacy checkpoint has no paired training state; raw weights and EMA history cannot be recovered.")
+
+        # Legacy checkpoints still support the original optimizer.pt fallback.
         optimizer_state_filename = f'optimizer.pt'
         optimizer_state_file_path = os.path.join(self.save_root, optimizer_state_filename)
-        if os.path.exists(optimizer_state_file_path):
+        if resume_state is None and os.path.exists(optimizer_state_file_path):
             # try to load
             # previous param groups
             # previous_params = copy.deepcopy(optimizer.param_groups)
@@ -2062,19 +2141,8 @@ class BaseSDTrainProcess(BaseTrainProcess):
 
         # set up the ema now that the optimizer (and its params) are ready
         self.setup_ema()
-
-        lr_scheduler_params = self.train_config.lr_scheduler_params
-
-        # make sure it had bare minimum
-        if 'max_iterations' not in lr_scheduler_params:
-            lr_scheduler_params['total_iters'] = self.train_config.steps
-
-        lr_scheduler = get_lr_scheduler(
-            self.train_config.lr_scheduler,
-            optimizer,
-            **lr_scheduler_params
-        )
-        self.lr_scheduler = lr_scheduler
+        if resume_state is not None and self.ema is not None and resume_state["ema"] is not None:
+            self.ema.load_state_dict(resume_state["ema"])
 
         ### HOOk ###
         self.before_dataset_load()
@@ -2084,6 +2152,26 @@ class BaseSDTrainProcess(BaseTrainProcess):
         if self.datasets_reg is not None:
             self.data_loader_reg = get_dataloader_from_datasets(self.datasets_reg, self.train_config.batch_size,
                                                                 self.sd)
+
+
+        lr_scheduler_params = self.train_config.lr_scheduler_params
+
+        # make sure it had bare minimum
+        if 'max_iterations' not in lr_scheduler_params and 'total_iters' not in lr_scheduler_params:
+            lr_scheduler_params['total_iters'] = self.get_scheduler_training_steps()
+
+        lr_scheduler = get_lr_scheduler(
+            self.train_config.lr_scheduler,
+            optimizer,
+            **lr_scheduler_params
+        )
+        self.lr_scheduler = lr_scheduler
+        if resume_state is not None and resume_state["scheduler"] is not None:
+            self.lr_scheduler.load_state_dict(resume_state["scheduler"])
+            # Scheduler construction may reset the optimizer LR.
+            for group, saved in zip(optimizer.param_groups, resume_state["optimizer"]["param_groups"]):
+                group["lr"] = saved["lr"]
+
 
         flush()
         self.last_save_step = self.step_num
@@ -2104,7 +2192,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
             compiled_refs = []  # (block_list, index, original_block) for rollback on failure
             try:
                 inner_unet_check = unwrap_model(self.sd.unet)
-                is_unet_offloaded = hasattr(inner_unet_check, '_memory_manager')
+                is_unet_offloaded = any(
+                    hasattr(module, '_memory_manager') for module in inner_unet_check.modules()
+                )
 
                 text_encoder = getattr(self.sd, "text_encoder", None)
                 text_encoder_check = unwrap_model(text_encoder) if text_encoder is not None else None
@@ -2340,7 +2430,22 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # zero any gradients
         optimizer.zero_grad()
 
-        self.lr_scheduler.step(self.step_num)
+        if resume_state is None:
+            # Legacy metadata counts microsteps; the scheduler counts optimizer updates.
+            scheduler_step = (self.epoch_num if self.train_config.gradient_accumulation_steps == -1
+                              else self.step_num // self.train_config.gradient_accumulation_steps)
+            if scheduler_step > 0:
+                self.lr_scheduler.step(scheduler_step)
+        else:
+            restore_training_gradients(resume_state, self.optimizer)
+            self._accumulated_samples = resume_state["progress"]["accumulated_samples"]
+            self._accumulation_microsteps = resume_state["progress"]["accumulation_step"]
+            self.grad_accumulation_step = self._accumulation_microsteps + 1
+            self._epoch_batches_seen = resume_state["progress"]["epoch_batches_seen"]
+            if resume_state["scaler"] is not None and self.accelerator.scaler is not None:
+                self.accelerator.scaler.load_state_dict(resume_state["scaler"])
+            del resume_state
+        self._completed_steps = self.step_num
 
         self.sd.set_device_state(self.train_device_state_preset)
         flush()
@@ -2397,7 +2502,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # keep track to alternate on an accumulation step for reg   
                     batch_step = step
                     # don't do a reg step on sample or save steps as we dont want to normalize on those
-                    if batch_step % 2 == 0 and dataloader_reg is not None and not is_save_step and not is_sample_step:
+                    if self.is_regularization_step(batch_step):
                         try:
                             with self.timer('get_batch:reg'):
                                 batch = next(dataloader_iterator_reg)
@@ -2426,14 +2531,16 @@ class BaseSDTrainProcess(BaseTrainProcess):
                                 dataloader_iterator = iter(dataloader)
                                 trigger_dataloader_setup_epoch(dataloader)
                                 self.epoch_num += 1
-                                if self.train_config.gradient_accumulation_steps == -1:
-                                    # if we are accumulating for an entire epoch, trigger a step
-                                    self.is_grad_accumulation_step = False
-                                    self.grad_accumulation_step = 0
                             with self.timer('get_batch'):
                                 batch = next(dataloader_iterator)
                             if self.progress_bar is not None:
                                 self.progress_bar.unpause()
+                        self._epoch_batches_seen += 1
+                        if self._epoch_batches_seen >= len(dataloader):
+                            self._epoch_batches_seen = 0
+                            if self.train_config.gradient_accumulation_steps == -1:
+                                self.is_grad_accumulation_step = False
+                                self.grad_accumulation_step = 0
                     else:
                         batch = None
                     batch_list.append(batch)
@@ -2452,6 +2559,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     self.is_grad_accumulation_step = not is_optimizer_step
                     if is_optimizer_step:
                         self.grad_accumulation_step = 0
+
+            # Flush the final partial window rather than silently discarding it.
+            if step == self.train_config.steps - 1:
+                self.is_grad_accumulation_step = False
+                self.grad_accumulation_step = 0
 
             # flush()
             ### HOOK ###
@@ -2474,6 +2586,9 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 if self.num_consecutive_oom > 3:
                     raise RuntimeError("OOM during training step 3 times in a row, aborting training")
                 optimizer.zero_grad(set_to_none=True)
+                self._accumulated_samples = 0
+                self._accumulation_microsteps = 0
+                self.grad_accumulation_step = 0
                 flush()
                 torch.cuda.ipc_collect()
                 # skip this step and keep going
@@ -2490,6 +2605,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                 
                 print("\n==== Profile Results ====")
                 print(self.torch_profiler.key_averages().table(sort_by="cpu_time_total", row_limit=1000))
+            self._completed_steps = step + 1
             self.timer.stop('train_loop')
             if not did_first_flush:
                 flush()
@@ -2558,8 +2674,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         print_acc(f"\nSaving at step {self.step_num}")
                         self.save(self.step_num)
                         self.ensure_params_requires_grad()
-                        # clear any grads
-                        optimizer.zero_grad()
+                        # Pending gradients belong to the current accumulation window.
                         flush()
                         flush_next = True
                         if self.progress_bar is not None:

@@ -77,6 +77,11 @@ class SDTrainer(BaseSDTrainProcess):
         #         return org_unscale_grads(optimizer, inv_scale, found_inf, True)
         #     self.scaler._unscale_grads_ = _unscale_grads_replacer
 
+        # Accumulation is managed here (including the legacy cross-step mode).
+        # Do not let Accelerate divide losses or advance the scheduler a second time.
+        self.accelerator.gradient_accumulation_steps = 1
+        self.accelerator.step_scheduler_with_optimizer = False
+        self._backward_scale = 1.0
         self.cached_blank_embeds: Optional[PromptEmbeds] = None
         self.cached_trigger_embeds: Optional[PromptEmbeds] = None
         self.diff_output_preservation_embeds: Optional[PromptEmbeds] = None
@@ -988,6 +993,7 @@ class SDTrainer(BaseSDTrainProcess):
             sd=self.sd,
             unconditional_embeds=unconditional_embeds,
             train_config=self.train_config,
+            loss_scale=self._backward_scale,
             **kwargs
         )
 
@@ -1112,7 +1118,7 @@ class SDTrainer(BaseSDTrainProcess):
         loss = loss.mean()
         if loss.item() > 1e3:
             pass
-        self.accelerator.backward(loss)
+        self.accelerator.backward(loss * self._backward_scale)
         return pure_loss
 
 
@@ -1516,6 +1522,10 @@ class SDTrainer(BaseSDTrainProcess):
             else:
                 prompt_2_list = [prompts_2]
 
+        # Each backward contributes a sample-weighted sum; normalize once before
+        # clipping/stepping, including single-item and internally-backwarded losses.
+        self._backward_scale = len(batch.file_items) / len(noisy_latents_list)
+        reported_loss = None
         for noisy_latents, noise, timesteps, conditioned_prompts, imgs, adapter_images, clip_images, mask_multiplier, prompt_2 in zip(
                 noisy_latents_list,
                 noise_list,
@@ -2107,9 +2117,11 @@ class SDTrainer(BaseSDTrainProcess):
                     # if self.is_bfloat:
                     # loss.backward()
                     # else:
-                    self.accelerator.backward(loss)
+                    self.accelerator.backward(loss * self._backward_scale)
+                detached_loss = loss.detach() / len(noisy_latents_list)
+                reported_loss = detached_loss if reported_loss is None else reported_loss + detached_loss
 
-        return loss.detach()
+        return reported_loss
         # flush()
 
     def hook_train_loop(self, batch: Union[DataLoaderBatchDTO, List[DataLoaderBatchDTO]]):
@@ -2118,7 +2130,9 @@ class SDTrainer(BaseSDTrainProcess):
         else:
             batch_list = [batch]
         total_loss = None
-        self.optimizer.zero_grad()
+        if self._accumulated_samples == 0:
+            self.optimizer.zero_grad(set_to_none=True)
+        reported_samples = 0
         for batch in batch_list:
             if self.sd.is_multistage:
                 # handle multistage switching
@@ -2133,6 +2147,10 @@ class SDTrainer(BaseSDTrainProcess):
                             # if this boundary is trainable, we can stop looking
                             break
             loss = self.train_single_accumulation(batch)
+            batch_size = len(batch.file_items)
+            self._accumulated_samples += batch_size
+            reported_samples += batch_size
+            loss = loss * batch_size
             self.steps_this_boundary += 1
             if total_loss is None:
                 total_loss = loss
@@ -2142,31 +2160,31 @@ class SDTrainer(BaseSDTrainProcess):
                 torch.cuda.empty_cache()
 
 
+        self._accumulation_microsteps += 1
         if not self.is_grad_accumulation_step:
-            # fix this for multi params
+            params = [param for group in self.optimizer.param_groups for param in group['params']]
+            # Normalize by the actual window size, including a final partial window.
+            for param in params:
+                if param.grad is not None:
+                    param.grad.div_(self._accumulated_samples)
             if self.train_config.optimizer != 'adafactor':
-                if isinstance(self.params[0], dict):
-                    for i in range(len(self.params)):
-                        self.accelerator.clip_grad_norm_(self.params[i]['params'], self.train_config.max_grad_norm)
-                else:
-                    self.accelerator.clip_grad_norm_(self.params, self.train_config.max_grad_norm)
+                self.accelerator.clip_grad_norm_(params, self.train_config.max_grad_norm)
             # only step if we are not accumulating
             with self.timer('optimizer_step'):
                 self.optimizer.step()
 
                 self.optimizer.zero_grad(set_to_none=True)
+                self._accumulated_samples = 0
+                self._accumulation_microsteps = 0
                 if self.adapter and isinstance(self.adapter, CustomAdapter):
                     self.adapter.post_weight_update()
-            if self.ema is not None:
+            update_succeeded = not self.accelerator.optimizer_step_was_skipped
+            if self.ema is not None and update_succeeded:
                 with self.timer('ema_update'):
                     self.ema.update()
-        else:
-            # gradient accumulation. Just a place for breakpoint
-            pass
-
-        # TODO Should we only step scheduler on grad step? If so, need to recalculate last step
-        with self.timer('scheduler_step'):
-            self.lr_scheduler.step()
+            if update_succeeded:
+                with self.timer('scheduler_step'):
+                    self.lr_scheduler.step()
 
         if self.embedding is not None:
             with self.timer('restore_embeddings'):
@@ -2178,7 +2196,7 @@ class SDTrainer(BaseSDTrainProcess):
                 self.adapter.restore_embeddings()
 
         loss_dict = OrderedDict(
-            {'loss': (total_loss / len(batch_list)).item()}
+            {'loss': (total_loss / reported_samples).item()}
         )
 
         self.end_of_training_loop()

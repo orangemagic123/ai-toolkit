@@ -1,3 +1,4 @@
+from toolkit.util.cache_identity import encoder_cache_identity
 import copy
 import json
 import os
@@ -521,6 +522,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             if hasattr(self.sd.unet, 'config') and hasattr(self.sd.unet.config, 'temporal_compression_ratio'):
                 temporal_compression = self.sd.unet.config.temporal_compression_ratio
         
+        latent_cache_identity = encoder_cache_identity(self.sd, "latent")
+        text_cache_identity = encoder_cache_identity(self.sd, "text")
         bad_count = 0
         for file in tqdm(file_list):
             try:
@@ -536,6 +539,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                     text_embedding_space_version=self.sd.text_embedding_space_version if self.sd else "sd1",
                     te_padding_side=self.sd.te_padding_side if self.sd else "right",
                     latent_space_version=latent_space_version,
+                    latent_cache_identity=latent_cache_identity,
+                    text_cache_identity=text_cache_identity,
                     temporal_compression=temporal_compression,
                     sample_rate=self.sd.sample_rate if self.is_audio_model and self.sd is not None else 48000,
                 )
