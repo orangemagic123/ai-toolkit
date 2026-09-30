@@ -89,6 +89,27 @@ export const modelArchs: ModelArch[] = [
     additionalSections: ['model.low_vram', 'model.layer_offloading'],
   },
   {
+    name: 'anima:2.9b',
+    label: 'Anima-2.9B',
+    group: 'image',
+    defaults: {
+      'config.process[0].model.name_or_path': ['Gazingstars123/Anima-2.9B', defaultNameOrPath],
+      'config.process[0].model.quantize': [false, false],
+      'config.process[0].model.quantize_te': [false, false],
+      'config.process[0].model.qtype': ['', 'qfloat8'],
+      'config.process[0].model.qtype_te': ['', 'qfloat8'],
+      'config.process[0].sample.sampler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.noise_scheduler': ['flowmatch', 'flowmatch'],
+      'config.process[0].train.timestep_type': ['weighted', 'sigmoid'],
+      'config.process[0].sample.neg': [
+        'worst quality, low quality, score_1, score_2, score_3, blurry, jpeg artifacts, sepia, signature, artist name',
+        '',
+      ],
+    },
+    disableSections: ['network.conv'],
+    additionalSections: ['model.low_vram', 'model.layer_offloading'],
+  },
+  {
     name: 'flux',
     label: 'FLUX.1',
     group: 'image',

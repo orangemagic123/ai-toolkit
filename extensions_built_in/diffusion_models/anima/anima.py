@@ -13,11 +13,12 @@ from toolkit.memory_management import MemoryManager
 from toolkit.models.base_model import BaseModel
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
+from toolkit.util.anima_loader import load_anima_pipeline
 from toolkit.util.cosmos_rope import install_dynamic_cosmos_rope
 from toolkit.util.quantize import get_qtype, quantize, quantize_model
 
 try:
-    from diffusers import AnimaAutoBlocks, AnimaModularPipeline, AnimaTextConditioner
+    from diffusers import AnimaModularPipeline, AnimaTextConditioner
     from diffusers.models import CosmosTransformer3DModel
     from diffusers.modular_pipelines import SequentialPipelineBlocks
     from diffusers.modular_pipelines.anima.modular_blocks_anima import AnimaCoreDenoiseStep, AnimaDecodeStep
@@ -259,12 +260,11 @@ class AnimaModel(BaseModel):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading Anima model")
 
-        pipe: AnimaModularPipeline = AnimaAutoBlocks().init_pipeline(self.model_config.name_or_path)
-        load_kwargs = {"torch_dtype": dtype}
-        model_path = os.path.abspath(os.path.expanduser(str(self.model_config.name_or_path)))
-        if os.path.isdir(model_path):
-            load_kwargs["pretrained_model_name_or_path"] = model_path
-        pipe.load_components(**load_kwargs)
+        pipe: AnimaModularPipeline = load_anima_pipeline(
+            self.model_config.name_or_path,
+            dtype,
+            extras_name_or_path=self.model_config.extras_name_or_path,
+        )
         pipe.update_components(scheduler=self.get_train_scheduler())
 
         transformer = pipe.transformer
