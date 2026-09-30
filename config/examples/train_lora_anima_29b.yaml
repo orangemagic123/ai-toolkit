@@ -1,0 +1,62 @@
+---
+# GUI: select "Anima-2.9B" under Model Architecture.
+# Uses the BF16 Anima-2.9B-preview-v1.safetensors release (40 DiT layers).
+# A local .safetensors file or a downloaded repo directory also works.
+# Qwen text encoder, tokenizers and VAE come from Anima-Base-v1.0-Diffusers.
+# Override model.extras_name_or_path to use a local copy of that Diffusers repo.
+job: extension
+config:
+  name: anima_29b_lora
+  process:
+    - type: diffusion_trainer
+      training_folder: output
+      device: cuda:0
+      network:
+        type: lora
+        linear: 32
+        linear_alpha: 32
+      save:
+        dtype: bf16
+        save_every: 250
+        max_step_saves_to_keep: 4
+      datasets:
+        - folder_path: /path/to/images
+          caption_ext: txt
+          caption_dropout_rate: 0.05
+          cache_latents_to_disk: true
+          resolution: [1024]
+      train:
+        batch_size: 1
+        gradient_accumulation: 1
+        steps: 2000
+        train_unet: true
+        train_text_encoder: false
+        gradient_checkpointing: true
+        noise_scheduler: flowmatch
+        timestep_type: weighted
+        optimizer: adamw8bit
+        lr: 0.0001
+        dtype: bf16
+      model:
+        name_or_path: Gazingstars123/Anima-2.9B
+        arch: anima:2.9b
+        quantize: false
+        quantize_te: false
+        model_kwargs:
+          train_text_conditioner: false
+          max_sequence_length: 512
+      sample:
+        sampler: flowmatch
+        sample_every: 250
+        width: 1024
+        height: 1024
+        samples:
+          - prompt: '1girl, blue hair, white dress, flower garden, sunlight, anime illustration'
+        neg: 'worst quality, low quality, blurry, jpeg artifacts'
+        seed: 42
+        walk_seed: false
+        guidance_scale: 4
+        sample_steps: 30
+meta:
+  name: '[name]'
+  version: '1.0'
