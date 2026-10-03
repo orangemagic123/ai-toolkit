@@ -1,10 +1,16 @@
 """Checkpoint-paired training state, separate from inference/EMA exports."""
 
+import hashlib
 import os
 import tempfile
 from pathlib import Path
 
 import torch
+
+
+STATE_VERSION = 2
+# Bytes hashed from each end of a checkpoint file to identify its contents.
+SIGNATURE_SAMPLE_BYTES = 1 << 20
 
 
 def training_state_path(checkpoint):
@@ -24,11 +30,31 @@ def _cpu_copy(value):
     return value
 
 
-def _checkpoint_signature(checkpoint):
+def _sampled_digest(path, size):
+    """Hash both ends of a file: cheap for multi-GB checkpoints, unlike a full hash."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        digest.update(source.read(SIGNATURE_SAMPLE_BYTES))
+        if size > SIGNATURE_SAMPLE_BYTES:
+            source.seek(max(SIGNATURE_SAMPLE_BYTES, size - SIGNATURE_SAMPLE_BYTES))
+            digest.update(source.read())
+    return digest.hexdigest()
+
+
+def _checkpoint_signature(checkpoint, version=STATE_VERSION):
     checkpoint = Path(checkpoint)
     files = sorted(path for path in checkpoint.rglob("*") if path.is_file()) if checkpoint.is_dir() else [checkpoint]
-    return [(str(path.relative_to(checkpoint)) if path != checkpoint else path.name,
-             path.stat().st_size, path.stat().st_mtime_ns) for path in files]
+    signature = []
+    for path in files:
+        stat = path.stat()
+        if version == 1:
+            # Version 1 used mtime, which changes when an output folder is copied or downloaded.
+            name = str(path.relative_to(checkpoint)) if path != checkpoint else path.name
+            signature.append((name, stat.st_size, stat.st_mtime_ns))
+        else:
+            name = path.relative_to(checkpoint).as_posix() if path != checkpoint else path.name
+            signature.append((name, stat.st_size, _sampled_digest(path, stat.st_size)))
+    return signature
 
 
 def save_training_state(checkpoint, optimizer, ema, scheduler, scaler, progress):
@@ -40,7 +66,7 @@ def save_training_state(checkpoint, optimizer, ema, scheduler, scaler, progress)
         # eval()/train() leaves a redundant snapshot behind; raw params are saved below.
         ema_state = dict(ema_state, collected_params=None)
     state = _cpu_copy({
-        "version": 1,
+        "version": STATE_VERSION,
         "checkpoint": _checkpoint_signature(checkpoint),
         "group_sizes": [len(group["params"]) for group in optimizer.param_groups],
         "parameters": params,
@@ -63,12 +89,23 @@ def save_training_state(checkpoint, optimizer, ema, scheduler, scaler, progress)
             os.remove(temporary)
 
 
+def _load_state_file(path):
+    try:
+        from toolkit.optimizers.optimizer_utils import Auto8bitTensor
+    except ImportError:
+        return torch.load(path, map_location="cpu", weights_only=True)
+    # Earlier Prodigy8bit states pickled Auto8bitTensor objects directly.
+    with torch.serialization.safe_globals([Auto8bitTensor]):
+        return torch.load(path, map_location="cpu", weights_only=True)
+
+
 def load_training_state(checkpoint):
     path = training_state_path(checkpoint)
     if not path.exists():
         return None
-    state = torch.load(path, map_location="cpu", weights_only=True)
-    if state.get("version") != 1 or state.get("checkpoint") != _checkpoint_signature(checkpoint):
+    state = _load_state_file(path)
+    version = state.get("version")
+    if version not in (1, STATE_VERSION) or state.get("checkpoint") != _checkpoint_signature(checkpoint, version):
         raise ValueError(f"Training state does not match checkpoint: {checkpoint}")
     return state
 
@@ -81,10 +118,17 @@ def restore_training_parameters(state, optimizer):
         param.shape != saved.shape for param, saved in zip(params, state["parameters"])
     ):
         raise ValueError("Checkpoint training parameter shapes have changed")
+    # Load the optimizer before touching parameters so a failure leaves both
+    # untouched and the caller can fall back to a normal checkpoint resume.
+    previous_optimizer = optimizer.__getstate__()
+    try:
+        optimizer.load_state_dict(state["optimizer"])
+    except Exception:
+        optimizer.__setstate__(previous_optimizer)
+        raise
     with torch.no_grad():
         for param, saved in zip(params, state["parameters"]):
             param.copy_(saved)
-    optimizer.load_state_dict(state["optimizer"])
 
 
 def restore_training_gradients(state, optimizer):

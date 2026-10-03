@@ -871,6 +871,45 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # A trailing regularization batch also needs a final partial-window update.
         return updates + int(bool(remaining) or (steps > 0 and self.is_regularization_step(steps - 1)))
 
+    def restore_paired_training_state(self, optimizer):
+        """Restore the exact state saved with the resume checkpoint, or return None
+        to resume from the checkpoint weights the way legacy checkpoints do."""
+        path = self._resume_checkpoint_path
+        if path is None:
+            return None
+        try:
+            resume_state = load_training_state(path)
+            if resume_state is None:
+                if self.train_config.ema_config.use_ema:
+                    print_acc("WARNING: Legacy checkpoint has no paired training state; raw weights and EMA history cannot be recovered.")
+                return None
+            if self.network is not None and self.network.did_change_weights:
+                print_acc("Network shape changed; starting fresh optimizer/EMA state")
+                return None
+            restore_training_parameters(resume_state, optimizer)
+        except Exception as e:
+            # An unusable state (unreadable, replaced checkpoint, changed trainable
+            # parameters) must not abort the run.
+            print_acc(f"WARNING: Could not restore the training state paired with {path}: {e}")
+            print_acc("WARNING: Resuming from the checkpoint weights without the paired optimizer/EMA state.")
+            return None
+        print_acc(f"Restored training weights and optimizer paired with {path}")
+        return resume_state
+
+    def restore_scheduler_state(self, resume_state, optimizer):
+        """Return True if the LR scheduler was restored; otherwise the caller fast-forwards it."""
+        if resume_state is None or resume_state["scheduler"] is None:
+            return False
+        try:
+            self.lr_scheduler.load_state_dict(resume_state["scheduler"])
+        except Exception as e:
+            print_acc(f"WARNING: Could not restore the LR scheduler state ({e}); fast-forwarding a new schedule instead.")
+            return False
+        # Scheduler construction may reset the optimizer LR.
+        for group, saved in zip(optimizer.param_groups, resume_state["optimizer"]["param_groups"]):
+            group["lr"] = saved["lr"]
+        return True
+
     def hook_train_loop(self, batch):
         # return loss
         return 0.0
@@ -2084,21 +2123,11 @@ class BaseSDTrainProcess(BaseTrainProcess):
             # only works for adafactor, but it should have thrown an error prior to this otherwise
             self.optimizer.enable_paramiter_swapping(self.train_config.paramiter_swapping_factor)
 
-        resume_state = None
-        if self._resume_checkpoint_path is not None:
-            resume_state = load_training_state(self._resume_checkpoint_path)
-        if resume_state is not None and self.network is not None and self.network.did_change_weights:
-            print_acc("Network shape changed; starting fresh optimizer/EMA state")
-            resume_state = None
-        if resume_state is not None:
-            restore_training_parameters(resume_state, optimizer)
-            if self.train_config.start_step is None:
-                self.step_num = resume_state["progress"]["step"]
-                self.start_step = self.step_num
-                self.epoch_num = resume_state["progress"]["epoch"]
-            print_acc(f"Restored training weights and optimizer paired with {self._resume_checkpoint_path}")
-        elif self._resume_checkpoint_path is not None and self.train_config.ema_config.use_ema:
-            print_acc("WARNING: Legacy checkpoint has no paired training state; raw weights and EMA history cannot be recovered.")
+        resume_state = self.restore_paired_training_state(optimizer)
+        if resume_state is not None and self.train_config.start_step is None:
+            self.step_num = resume_state["progress"]["step"]
+            self.start_step = self.step_num
+            self.epoch_num = resume_state["progress"]["epoch"]
 
         # Legacy checkpoints still support the original optimizer.pt fallback.
         optimizer_state_filename = f'optimizer.pt'
@@ -2166,11 +2195,7 @@ class BaseSDTrainProcess(BaseTrainProcess):
             **lr_scheduler_params
         )
         self.lr_scheduler = lr_scheduler
-        if resume_state is not None and resume_state["scheduler"] is not None:
-            self.lr_scheduler.load_state_dict(resume_state["scheduler"])
-            # Scheduler construction may reset the optimizer LR.
-            for group, saved in zip(optimizer.param_groups, resume_state["optimizer"]["param_groups"]):
-                group["lr"] = saved["lr"]
+        scheduler_restored = self.restore_scheduler_state(resume_state, optimizer)
 
 
         flush()
@@ -2430,13 +2455,13 @@ class BaseSDTrainProcess(BaseTrainProcess):
         # zero any gradients
         optimizer.zero_grad()
 
-        if resume_state is None:
+        if not scheduler_restored:
             # Legacy metadata counts microsteps; the scheduler counts optimizer updates.
             scheduler_step = (self.epoch_num if self.train_config.gradient_accumulation_steps == -1
                               else self.step_num // self.train_config.gradient_accumulation_steps)
             if scheduler_step > 0:
                 self.lr_scheduler.step(scheduler_step)
-        else:
+        if resume_state is not None:
             restore_training_gradients(resume_state, self.optimizer)
             self._accumulated_samples = resume_state["progress"]["accumulated_samples"]
             self._accumulation_microsteps = resume_state["progress"]["accumulation_step"]

@@ -275,7 +275,7 @@ class AnimaModel(BaseModel):
 
         if self.model_config.quantize:
             self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer)
+            quantize_model(self, transformer, block_names=self.get_quantization_block_names())
             flush()
 
             self.print_and_status_update("Quantizing Text Conditioner")
@@ -605,10 +605,16 @@ class AnimaModel(BaseModel):
         return "anima"
 
     def get_transformer_block_names(self) -> Optional[List[str]]:
+        # Relative to AnimaTrainableModel, which is what gets trained and compiled.
         block_names = ["transformer.transformer_blocks"]
         if self.train_text_conditioner:
             block_names.append("text_conditioner.blocks")
         return block_names
+
+    def get_quantization_block_names(self) -> List[str]:
+        # quantize_model() receives the bare transformer, not AnimaTrainableModel.
+        prefix = "transformer."
+        return [name[len(prefix):] for name in self.get_transformer_block_names() if name.startswith(prefix)]
 
     def get_model_to_train(self):
         return self.trainable_model
