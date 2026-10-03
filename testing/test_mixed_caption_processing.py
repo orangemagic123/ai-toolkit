@@ -289,6 +289,7 @@ class MixedCaptionProcessingTest(unittest.TestCase):
                         keep_tokens_separator=None,
                         default_caption=None,
                         use_short_captions=False,
+                        diff_output_preservation=False,
                     ),
                 )
                 item.get_caption = lambda short_caption=False: item.raw_caption

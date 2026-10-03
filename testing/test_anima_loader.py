@@ -1,10 +1,11 @@
-"""CPU loading/backprop regressions; uses tiny Diffusers models, no downloads.
+"""CPU loading/backprop regressions; uses tiny Diffusers/v2 models, no downloads.
 
 Run: python -m unittest testing.test_anima_loader testing.test_anima_rope
 """
 
 import tempfile
 import unittest
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -75,6 +76,9 @@ class AnimaCheckpointTests(unittest.TestCase):
 
     def test_all_40_blocks_and_conditioner_load_and_train(self):
         transformer, conditioner = loader.load_anima_single_file(str(self.path), str(self.root), torch.float32)
+        # v2 modules carry the quantize/offload/placement policy used by AnimaModel.load_model.
+        self.assertTrue(hasattr(transformer, "aitk_post_load"))
+        self.assertTrue(hasattr(conditioner, "aitk_post_load"))
         self.assertEqual(len(transformer.transformer_blocks), 40)
         self.assertEqual(transformer.config.num_layers, 40)
         for source, loaded in [(self.transformer, transformer), (self.conditioner, conditioner)]:
@@ -135,33 +139,58 @@ class AnimaCheckpointTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "non-contiguous"):
                 loader.get_anima_layer_count(keys, "blocks.")
 
-    def test_pipeline_uses_checkpoint_components_and_only_downloads_extras(self):
-        transformer, conditioner = Mock(), Mock()
-        with patch("diffusers.AnimaAutoBlocks") as blocks, patch.object(
-            loader, "load_anima_single_file", return_value=(transformer, conditioner)
-        ) as load:
-            pipe = loader.load_anima_pipeline(str(self.path), torch.bfloat16, str(self.path))
-            blocks.return_value.init_pipeline.assert_called_once_with(loader.ANIMA_BASE_REPO)
-            load.assert_called_once_with(str(self.path), loader.ANIMA_BASE_REPO, torch.bfloat16)
-            pipe.update_components.assert_called_once_with(transformer=transformer, text_conditioner=conditioner)
-            self.assertEqual(set(pipe.load_components.call_args.kwargs["names"]),
-                             {"text_encoder", "tokenizer", "t5_tokenizer", "vae", "scheduler"})
+    def load_components(self, name_or_path, extras=None):
+        """Run load_anima_components with every hub/disk load mocked out."""
+        from toolkit.models.v2.diffusion_models.cosmos import CosmosTransformer3DModel as V2Transformer
+        from toolkit.models.v2.text_encoders.anima import AnimaTextConditioner as V2Conditioner
+        from toolkit.models.v2.text_encoders.qwen3 import Qwen3ModelEncoder
+        from toolkit.models.v2.vae.qwen_image import QwenImageVAE
 
-    def test_existing_diffusers_pipeline_loading_is_preserved(self):
-        with patch("diffusers.AnimaAutoBlocks") as blocks:
-            pipe = loader.load_anima_pipeline(loader.ANIMA_BASE_REPO, torch.bfloat16)
-            blocks.return_value.init_pipeline.assert_called_once_with(loader.ANIMA_BASE_REPO)
-            pipe.load_components.assert_called_once_with(torch_dtype=torch.bfloat16)
+        with ExitStack() as stack:
+            mocks = {
+                name: stack.enter_context(patch.object(cls, "load_model"))
+                for name, cls in [("transformer", V2Transformer), ("text_conditioner", V2Conditioner),
+                                  ("text_encoder", Qwen3ModelEncoder), ("vae", QwenImageVAE)]
+            }
+            mocks["tokenizer"] = stack.enter_context(patch("transformers.AutoTokenizer.from_pretrained"))
+            mocks["single_file"] = stack.enter_context(
+                patch.object(loader, "load_anima_single_file", return_value=(Mock(), Mock())))
+            components, components_path = loader.load_anima_components(name_or_path, torch.bfloat16, extras)
+        return components, components_path, mocks
+
+    def assert_shared_components_from(self, mocks, components_path):
+        for name in ("vae", "text_encoder"):
+            mocks[name].assert_called_once_with(components_path, dtype=torch.bfloat16)
+        self.assertEqual({call.args for call in mocks["tokenizer"].call_args_list},
+                         {(components_path,)})
+        self.assertEqual({call.kwargs["subfolder"] for call in mocks["tokenizer"].call_args_list},
+                         {"tokenizer", "t5_tokenizer"})
+
+    def test_checkpoint_uses_its_dit_and_only_loads_extras(self):
+        components, components_path, mocks = self.load_components(str(self.path), str(self.path))
+        self.assertEqual(components_path, loader.ANIMA_BASE_REPO)
+        mocks["single_file"].assert_called_once_with(str(self.path), loader.ANIMA_BASE_REPO, torch.bfloat16)
+        transformer, conditioner = mocks["single_file"].return_value
+        self.assertIs(components["transformer"], transformer)
+        self.assertIs(components["text_conditioner"], conditioner)
+        mocks["transformer"].assert_not_called()
+        mocks["text_conditioner"].assert_not_called()
+        self.assert_shared_components_from(mocks, loader.ANIMA_BASE_REPO)
+
+    def test_existing_diffusers_source_loads_every_component(self):
+        components, components_path, mocks = self.load_components(loader.ANIMA_BASE_REPO)
+        self.assertEqual(components_path, loader.ANIMA_BASE_REPO)
+        mocks["single_file"].assert_not_called()
+        for name in ("transformer", "text_conditioner"):
+            mocks[name].assert_called_once_with(loader.ANIMA_BASE_REPO, dtype=torch.bfloat16)
+            self.assertIs(components[name], mocks[name].return_value)
+        self.assert_shared_components_from(mocks, loader.ANIMA_BASE_REPO)
 
     def test_local_extras_path_is_used_for_all_components(self):
-        with patch("diffusers.AnimaAutoBlocks") as blocks, patch.object(
-            loader, "load_anima_single_file", return_value=(Mock(), Mock())
-        ) as load:
-            pipe = loader.load_anima_pipeline(str(self.path), torch.bfloat16, str(self.root))
-            blocks.return_value.init_pipeline.assert_called_once_with(str(self.root))
-            load.assert_called_once_with(str(self.path), str(self.root), torch.bfloat16)
-            self.assertEqual(pipe.load_components.call_args.kwargs["pretrained_model_name_or_path"], str(self.root))
-
+        _, components_path, mocks = self.load_components(str(self.path), str(self.root))
+        self.assertEqual(components_path, str(self.root))
+        mocks["single_file"].assert_called_once_with(str(self.path), str(self.root), torch.bfloat16)
+        self.assert_shared_components_from(mocks, str(self.root))
 
 if __name__ == "__main__":
     unittest.main()
