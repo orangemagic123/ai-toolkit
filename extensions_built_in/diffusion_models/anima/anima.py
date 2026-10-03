@@ -3,23 +3,21 @@ from typing import List, Optional
 
 import torch
 import yaml
-from optimum.quanto import freeze
 from safetensors.torch import load_file, save_file
 
 from toolkit.accelerator import unwrap_model
 from toolkit.basic import flush
 from toolkit.config_modules import GenerateImageConfig, ModelConfig
-from toolkit.memory_management import MemoryManager
 from toolkit.models.base_model import BaseModel
+from toolkit.models.v2.diffusion_models.cosmos import CosmosTransformer3DModel
+from toolkit.models.v2.text_encoders.anima import AnimaTextConditioner
 from toolkit.prompt_utils import PromptEmbeds
 from toolkit.samplers.custom_flowmatch_sampler import CustomFlowMatchEulerDiscreteScheduler
-from toolkit.util.anima_loader import load_anima_pipeline
+from toolkit.util.anima_loader import load_anima_components
 from toolkit.util.cosmos_rope import install_dynamic_cosmos_rope
-from toolkit.util.quantize import get_qtype, quantize, quantize_model
 
 try:
-    from diffusers import AnimaModularPipeline, AnimaTextConditioner
-    from diffusers.models import CosmosTransformer3DModel
+    from diffusers import AnimaAutoBlocks, AnimaModularPipeline
     from diffusers.modular_pipelines import SequentialPipelineBlocks
     from diffusers.modular_pipelines.anima.modular_blocks_anima import AnimaCoreDenoiseStep, AnimaDecodeStep
 except ImportError as e:
@@ -260,12 +258,17 @@ class AnimaModel(BaseModel):
         dtype = self.torch_dtype
         self.print_and_status_update("Loading Anima model")
 
-        pipe: AnimaModularPipeline = load_anima_pipeline(
+        # components load individually through the v2 module classes, from a Diffusers
+        # source or an original single-file checkpoint (e.g. Anima-2.9B), and are
+        # handed to the modular pipeline
+        self.print_and_status_update("Loading components")
+        components, components_path = load_anima_components(
             self.model_config.name_or_path,
             dtype,
             extras_name_or_path=self.model_config.extras_name_or_path,
         )
-        pipe.update_components(scheduler=self.get_train_scheduler())
+        pipe: AnimaModularPipeline = AnimaAutoBlocks().init_pipeline(components_path)
+        pipe.update_components(**components, scheduler=self.get_train_scheduler())
 
         transformer = pipe.transformer
         text_conditioner = pipe.text_conditioner
@@ -273,62 +276,23 @@ class AnimaModel(BaseModel):
         # length even when their total pixel area is within the training target.
         install_dynamic_cosmos_rope(transformer)
 
-        if self.model_config.quantize:
-            self.print_and_status_update("Quantizing Transformer")
-            quantize_model(self, transformer, block_names=self.get_quantization_block_names())
-            flush()
+        # quantize + offload + placement, all driven by model_config
+        transformer.aitk_post_load(**self.component_load_kwargs("transformer"))
 
-            self.print_and_status_update("Quantizing Text Conditioner")
-            quantize(text_conditioner, weights=get_qtype(self.model_config.qtype))
-            freeze(text_conditioner)
-            flush()
+        # the text conditioner rides the transformer quantize flag (at qtype_te)
+        # but takes the text-encoder offload/placement policy
+        tc_kwargs = self.component_load_kwargs("te")
+        tc_kwargs["qtype"] = (
+            self.model_config.qtype_te if self.model_config.quantize else None
+        )
+        text_conditioner.aitk_post_load(**tc_kwargs)
+        flush()
 
-        if (
-            self.model_config.layer_offloading
-            and self.model_config.layer_offloading_transformer_percent > 0
-        ):
-            MemoryManager.attach(
-                transformer,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_transformer_percent,
-            )
-
-        if (
-            self.model_config.layer_offloading
-            and self.model_config.layer_offloading_text_encoder_percent > 0
-        ):
-            MemoryManager.attach(
-                pipe.text_encoder,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent,
-            )
-            MemoryManager.attach(
-                text_conditioner,
-                self.device_torch,
-                offload_percent=self.model_config.layer_offloading_text_encoder_percent,
-            )
-
-        if self.model_config.low_vram:
-            self.print_and_status_update("Moving transformer to CPU")
-            transformer.to("cpu")
-            text_conditioner.to("cpu")
-        else:
-            transformer.to(self.device_torch, dtype=dtype)
-            text_conditioner.to(self.device_torch, dtype=dtype)
-
-        pipe.text_encoder.to(self.device_torch, dtype=dtype)
+        # quantize + offload + placement, all driven by model_config
+        pipe.text_encoder.aitk_post_load(**self.component_load_kwargs("te"))
         pipe.text_encoder.requires_grad_(False)
         pipe.text_encoder.eval()
-
-        if self.model_config.quantize_te:
-            self.print_and_status_update("Quantizing Text Encoder")
-            quantize(pipe.text_encoder, weights=get_qtype(self.model_config.qtype_te))
-            freeze(pipe.text_encoder)
-            flush()
-
-        if self.model_config.low_vram:
-            pipe.text_encoder.to("cpu")
-            flush()
+        flush()
 
         self.noise_scheduler = pipe.scheduler
         self.vae = pipe.vae
@@ -610,11 +574,6 @@ class AnimaModel(BaseModel):
         if self.train_text_conditioner:
             block_names.append("text_conditioner.blocks")
         return block_names
-
-    def get_quantization_block_names(self) -> List[str]:
-        # quantize_model() receives the bare transformer, not AnimaTrainableModel.
-        prefix = "transformer."
-        return [name[len(prefix):] for name in self.get_transformer_block_names() if name.startswith(prefix)]
 
     def get_model_to_train(self):
         return self.trainable_model

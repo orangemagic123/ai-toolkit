@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -38,6 +39,7 @@ TRAINER = "extensions_built_in/sd_trainer/SDTrainer.py"
 UI_TRAINER = "extensions_built_in/sd_trainer/DiffusionTrainer.py"
 ANIMA = "extensions_built_in/diffusion_models/anima/anima.py"
 QUANTIZE = "toolkit/util/quantize.py"
+COSMOS = "toolkit/models/v2/diffusion_models/cosmos.py"
 
 
 def source_object(path, class_name, method=None, **namespace):
@@ -69,6 +71,7 @@ def toy_trainer():
     trainer.hook_train_loop = MethodType(source_object(
         TRAINER, "SDTrainer", "hook_train_loop", torch=torch, OrderedDict=OrderedDict,
         CustomAdapter=type("CustomAdapter", (), {}), ClipVisionAdapter=type("ClipVisionAdapter", (), {}),
+        sync_grad_transfers=lambda: None,
     ), trainer)
 
     def microbatch(batch):
@@ -505,13 +508,15 @@ def file_item(tmp_path):
         crop_x=0, crop_y=0, crop_width=512, crop_height=512, latent_space_version="anima",
         text_embedding_space_version="anima", latent_version=1, text_embedding_version=1,
         latent_cache_identity="vae-a", text_cache_identity="encoder-a", flip_x=False,
-        flip_y=False, is_audio_model=False, encode_control_in_text_embeddings=True,
+        flip_y=False, is_audio_model=False, is_video=False, load_rgba=False,
+        encode_control_in_text_embeddings=True,
         control_path=None, _latent_path=None, _text_embedding_path=None,
-        dataset_config=SimpleNamespace(auto_frame_count=False, num_frames=1),
+        dataset_config=SimpleNamespace(auto_frame_count=False, num_frames=1, cache_tensors_to_disk=False),
     )
     for cls, names in (
         ("LatentCachingFileItemDTOMixin", ["get_latent_info_dict", "get_latent_path"]),
-        ("TextEmbeddingFileItemDTOMixin", ["get_text_embedding_info_dict", "get_text_embedding_path"]),
+        ("TextEmbeddingFileItemDTOMixin",
+         ["get_text_embedding_info_dict", "_build_text_embedding_path", "get_text_embedding_path"]),
     ):
         for name in names:
             method = source_object("toolkit/dataloader_mixins.py", cls, name, os=os,
@@ -593,45 +598,43 @@ def test_anima_attention_reaches_both_components_and_block_paths_resolve():
         torch.testing.assert_close(module[0](inputs), expected)
 
 
-@pytest.mark.parametrize("train_text_conditioner", [False, True])
-def test_anima_quantizes_transformer_blocks_one_at_a_time(monkeypatch, train_text_conditioner):
+def test_anima_transformer_quantizes_blocks_one_at_a_time(monkeypatch):
     monkeypatch.setitem(sys.modules, "toolkit.dequantize",
                         SimpleNamespace(patch_dequantization_on_save=lambda model: None))
     quantized, messages = [], []
-    quantize_model = source_object(
-        QUANTIZE, None, "quantize_model", torch=torch, get_qtype=lambda qtype: qtype,
+    quantize_module = source_object(
+        QUANTIZE, None, "quantize_module", torch=torch, os=os, time=time, get_qtype=lambda qtype: qtype,
         tqdm=lambda items: items, freeze=lambda module: None, print_acc=messages.append,
-        quantize=lambda module, weights, exclude=None: quantized.append(module),
+        _has_quantizable_linear=lambda *args: True,
+        quantize=lambda module, weights, exclude=None, **kwargs: quantized.append(module),
     )
-    anima = SimpleNamespace(
-        train_text_conditioner=train_text_conditioner, device_torch=torch.device("cpu"),
-        torch_dtype=torch.float32, model_config=SimpleNamespace(accuracy_recovery_adapter=None, qtype="qfloat8"),
-        get_quantization_exclude_modules=lambda: None, print_and_status_update=messages.append,
-    )
-    for method in ("get_transformer_block_names", "get_quantization_block_names"):
-        setattr(anima, method, MethodType(source_object(ANIMA, "AnimaModel", method), anima))
-    # load_model() quantizes the bare Cosmos transformer, before AnimaTrainableModel wraps it.
+    # load_model() quantizes the bare v2 Cosmos transformer with its own block names.
+    block_names = source_object(COSMOS, "CosmosTransformer3DModel", "get_transformer_block_names").__func__(None)
     transformer = torch.nn.Module()
     transformer.transformer_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)])
 
-    quantize_model(anima, transformer, block_names=anima.get_quantization_block_names())
+    quantize_module(transformer, "qfloat8", block_names=block_names, status_fn=messages.append)
     assert quantized == [*transformer.transformer_blocks, transformer]
-    assert " - quantizing 2 transformer blocks" in messages
+    assert " - quantizing 2 blocks" in messages
     assert not any("WARNING" in message for message in messages)
 
-    # The wrapper-relative names cannot resolve on the bare transformer and now say so.
+    # AnimaModel's names are relative to AnimaTrainableModel (compile/LoRA) and cannot
+    # resolve on the bare transformer; that silent fallback now warns.
     quantized.clear()
     messages.clear()
-    quantize_model(anima, transformer)
+    anima_names = source_object(ANIMA, "AnimaModel", "get_transformer_block_names")(
+        SimpleNamespace(train_text_conditioner=False))
+    quantize_module(transformer, "qfloat8", block_names=anima_names, status_fn=messages.append)
     assert quantized == [transformer]
-    assert any("block path 'transformer.transformer_blocks' not found" in message for message in messages)
+    assert any(message.startswith(" - WARNING: no blocks found") for message in messages)
 
     tree = ast.parse((ROOT / ANIMA).read_text(encoding="utf-8"))
     anima_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AnimaModel")
     load_model = next(node for node in anima_class.body if isinstance(node, ast.FunctionDef) and node.name == "load_model")
-    calls = [ast.unparse(node) for node in ast.walk(load_model)
-             if isinstance(node, ast.Call) and ast.unparse(node.func) == "quantize_model"]
-    assert calls == ["quantize_model(self, transformer, block_names=self.get_quantization_block_names())"]
+    calls = [ast.unparse(node) for node in ast.walk(load_model) if isinstance(node, ast.Call)]
+    assert "install_dynamic_cosmos_rope(transformer)" in calls
+    assert "transformer.aitk_post_load(**self.component_load_kwargs('transformer'))" in calls
+    assert not any(call.startswith("quantize_model(") for call in calls)
 
 
 def test_anima_prediction_uses_prepared_model_forward():
