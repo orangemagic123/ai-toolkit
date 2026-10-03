@@ -13,6 +13,8 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import shutil
+import sys
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
@@ -21,22 +23,29 @@ import torch
 from accelerate import Accelerator
 
 from toolkit.ema import ExponentialMovingAverage
+from toolkit.optimizers.optimizer_utils import Auto8bitTensor
+from toolkit.optimizers.prodigy_8bit import Prodigy8bit
 from toolkit.util.cache_identity import encoder_cache_identity, source_identity
 from toolkit.util.training_state import (
-    load_training_state, remove_training_state, restore_training_gradients,
-    restore_training_parameters, save_training_state, training_state_path,
+    SIGNATURE_SAMPLE_BYTES, _checkpoint_signature, load_training_state, remove_training_state,
+    restore_training_gradients, restore_training_parameters, save_training_state, training_state_path,
 )
 
 
 ROOT = Path(__file__).resolve().parents[1]
 BASE = "jobs/process/BaseSDTrainProcess.py"
 TRAINER = "extensions_built_in/sd_trainer/SDTrainer.py"
+UI_TRAINER = "extensions_built_in/sd_trainer/DiffusionTrainer.py"
 ANIMA = "extensions_built_in/diffusion_models/anima/anima.py"
+QUANTIZE = "toolkit/util/quantize.py"
 
 
 def source_object(path, class_name, method=None, **namespace):
-    tree = ast.parse((ROOT / path).read_text())
-    node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
+    """Load a class or method, or a module-level function when class_name is None."""
+    tree = ast.parse((ROOT / path).read_text(encoding="utf-8"))
+    node = tree
+    if class_name is not None:
+        node = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == class_name)
     if method is not None:
         node = next(node for node in node.body if isinstance(node, ast.FunctionDef) and node.name == method)
     module = ast.Module(body=[ast.ImportFrom(module="__future__", names=[ast.alias(name="annotations")], level=0), node], type_ignores=[])
@@ -123,9 +132,36 @@ def test_skipped_optimizer_update_does_not_advance_ema_or_schedule():
     trainer.ema.update.assert_not_called()
 
 
+def test_ui_save_and_sample_keep_pending_accumulation():
+    reference, expected = toy_trainer()
+    trainer, actual = toy_trainer()
+    full, split = batches()
+    reference.hook_train_loop(full)
+    ui_namespace = dict(print_acc=lambda *args: None, flush=lambda: None)
+    for method in ("maybe_save", "maybe_sample"):
+        setattr(trainer, method, MethodType(source_object(UI_TRAINER, "DiffusionTrainer", method, **ui_namespace), trainer))
+    trainer.is_ui_trainer = True
+    trainer.should_save = trainer.should_sample = lambda: True
+    trainer.update_db_key = Mock()
+    trainer.progress_bar = None
+    trainer.step_num = 1
+    trainer.save, trainer.sample, trainer.ensure_params_requires_grad = Mock(), Mock(), Mock()
+    trainer.train_config.free_u = trainer.train_config.unload_text_encoder = False
+    for index, batch in enumerate(split):
+        trainer.is_grad_accumulation_step = index < len(split) - 1
+        trainer.hook_train_loop(batch)
+        if index == 0:
+            # "Save Now" / "Sample Now" pressed in the middle of an accumulation window.
+            trainer.maybe_save()
+            trainer.maybe_sample()
+    trainer.save.assert_called_once_with(1)
+    trainer.sample.assert_called_once_with(1)
+    torch.testing.assert_close(actual, expected)
+
+
 @pytest.mark.parametrize("window,regularization,expected_steps", [(2, False, [2, 4, 5]), (-1, False, [3, 5]), (-1, True, [5])])
 def test_real_batch_collection_steps_at_window_epoch_and_final_boundaries(window, regularization, expected_steps):
-    tree = ast.parse((ROOT / BASE).read_text())
+    tree = ast.parse((ROOT / BASE).read_text(encoding="utf-8"))
     run = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "run")
     loop = next(node for node in ast.walk(run) if isinstance(node, ast.For)
                 and ast.unparse(node.target) == "step")
@@ -256,6 +292,150 @@ def test_state_rejects_changed_parameter_layout_before_overwriting(tmp_path):
     with pytest.raises(ValueError, match="shapes have changed"):
         restore_training_parameters(load_training_state(checkpoint), torch.optim.AdamW([replacement]))
     torch.testing.assert_close(replacement, torch.ones(3))
+
+
+def test_optimizer_load_failure_leaves_parameters_and_optimizer_untouched(tmp_path):
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"model")
+    param, optimizer, scheduler, ema = training_objects()
+    update(param, optimizer, scheduler, ema)
+    save_training_state(checkpoint, optimizer, ema, scheduler, None, {})
+    state = load_training_state(checkpoint)
+    state["optimizer"]["param_groups"][0]["params"] = []
+    resumed, resumed_optimizer, _, _ = training_objects()
+    initial = resumed.detach().clone()
+    with pytest.raises(ValueError):
+        restore_training_parameters(state, resumed_optimizer)
+    torch.testing.assert_close(resumed, initial)
+    assert resumed_optimizer.state_dict()["state"] == {}
+    assert resumed_optimizer.param_groups[0]["params"][0] is resumed
+
+
+def test_copied_checkpoint_keeps_paired_state_but_detects_replacement(tmp_path):
+    run, copied = tmp_path / "run", tmp_path / "copied"
+    run.mkdir()
+    checkpoint = run / "model.safetensors"
+    checkpoint.write_bytes(os.urandom(3 * SIGNATURE_SAMPLE_BYTES))
+    _, optimizer, scheduler, ema = training_objects()
+    save_training_state(checkpoint, optimizer, ema, scheduler, None, {"step": 4})
+    # Copying or downloading an output folder does not preserve modification times.
+    shutil.copytree(run, copied, copy_function=shutil.copy)
+    copied_checkpoint = copied / "model.safetensors"
+    os.utime(copied_checkpoint, ns=(1, 1))
+    assert load_training_state(copied_checkpoint)["progress"] == {"step": 4}
+    data = bytearray(copied_checkpoint.read_bytes())
+    data[-1] ^= 0xFF
+    copied_checkpoint.write_bytes(bytes(data))
+    with pytest.raises(ValueError, match="does not match"):
+        load_training_state(copied_checkpoint)
+
+
+def test_version_1_states_still_match_their_checkpoint(tmp_path):
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"model")
+    _, optimizer, scheduler, ema = training_objects()
+    save_training_state(checkpoint, optimizer, ema, scheduler, None, {"step": 2})
+    path = training_state_path(checkpoint)
+    state = torch.load(path, weights_only=True)
+    state.update(version=1, checkpoint=_checkpoint_signature(checkpoint, version=1))
+    torch.save(state, path)
+    assert load_training_state(checkpoint)["progress"] == {"step": 2}
+
+
+def prodigy8bit_with_state():
+    param = torch.nn.Parameter(torch.tensor([1.0, -2.0, 0.5]))
+    optimizer = Prodigy8bit([param])
+    # Prodigy8bit.step() requires CUDA; this is the per-parameter state it creates.
+    optimizer.state[param].update(step=2, **{
+        key: Auto8bitTensor(torch.tensor([0.1, -0.2, 0.3]) * scale)
+        for scale, key in enumerate(("s", "p0", "exp_avg", "exp_avg_sq"), start=1)
+    })
+    return param, optimizer
+
+
+@pytest.mark.parametrize("legacy_pickle", [False, True])
+def test_prodigy8bit_state_resumes_with_weights_only_loading(tmp_path, legacy_pickle):
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"model")
+    _, optimizer = prodigy8bit_with_state()
+    if legacy_pickle:
+        # Earlier versions saved the Auto8bitTensor objects themselves.
+        optimizer.state_dict = MethodType(torch.optim.Optimizer.state_dict, optimizer)
+    save_training_state(checkpoint, optimizer, None, None, None, {})
+    if not legacy_pickle:
+        # Loadable without allowlisting any toolkit class.
+        torch.load(training_state_path(checkpoint), weights_only=True)
+    saved = next(iter(optimizer.state.values()))
+    assert all(isinstance(saved[key], Auto8bitTensor) for key in ("s", "p0", "exp_avg", "exp_avg_sq"))
+
+    _, resumed_optimizer = prodigy8bit_with_state()
+    resumed_optimizer.state.clear()
+    restore_training_parameters(load_training_state(checkpoint), resumed_optimizer)
+    restored = next(iter(resumed_optimizer.state.values()))
+    assert restored["step"] == 2
+    for key in ("s", "p0", "exp_avg", "exp_avg_sq"):
+        assert isinstance(restored[key], Auto8bitTensor)
+        assert restored[key].quantized.dtype == torch.int8
+        torch.testing.assert_close(restored[key].dequantize(), saved[key].dequantize())
+
+
+def paired_restore_method(messages):
+    return source_object(BASE, "BaseSDTrainProcess", "restore_paired_training_state",
+                         load_training_state=load_training_state,
+                         restore_training_parameters=restore_training_parameters,
+                         print_acc=messages.append)
+
+
+@pytest.mark.parametrize("problem", ["corrupt", "replaced", "layout"])
+def test_unusable_paired_state_falls_back_instead_of_aborting(tmp_path, problem):
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"model")
+    param, optimizer, scheduler, ema = training_objects()
+    update(param, optimizer, scheduler, ema)
+    save_training_state(checkpoint, optimizer, ema, scheduler, None, {"step": 1})
+    resumed = torch.nn.Parameter(torch.ones(3 if problem == "layout" else 2))
+    resumed_optimizer = torch.optim.AdamW([resumed])
+    if problem == "corrupt":
+        training_state_path(checkpoint).write_bytes(b"truncated")
+    elif problem == "replaced":
+        checkpoint.write_bytes(b"other model")
+    messages = []
+    process = SimpleNamespace(_resume_checkpoint_path=str(checkpoint), network=None,
+                              train_config=SimpleNamespace(ema_config=SimpleNamespace(use_ema=True)))
+    assert paired_restore_method(messages)(process, resumed_optimizer) is None
+    assert any(message.startswith("WARNING: Could not restore") for message in messages)
+    torch.testing.assert_close(resumed, torch.ones_like(resumed))
+    assert resumed_optimizer.state_dict()["state"] == {}
+
+
+def test_paired_state_is_restored_when_usable(tmp_path):
+    checkpoint = tmp_path / "model.safetensors"
+    checkpoint.write_bytes(b"model")
+    param, optimizer, scheduler, ema = training_objects()
+    update(param, optimizer, scheduler, ema)
+    save_training_state(checkpoint, optimizer, ema, scheduler, None, {"step": 1})
+    resumed, resumed_optimizer, _, _ = training_objects()
+    process = SimpleNamespace(_resume_checkpoint_path=str(checkpoint), network=None,
+                              train_config=SimpleNamespace(ema_config=SimpleNamespace(use_ema=True)))
+    state = paired_restore_method([])(process, resumed_optimizer)
+    assert state["progress"] == {"step": 1}
+    torch.testing.assert_close(resumed, param)
+
+
+def test_incompatible_scheduler_state_is_fast_forwarded_instead_of_aborting():
+    param = torch.nn.Parameter(torch.ones(2))
+    optimizer = torch.optim.AdamW([param], lr=0.01)
+    saved = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    state = {"scheduler": saved.state_dict(), "optimizer": optimizer.state_dict()}
+    messages = []
+    restore = source_object(BASE, "BaseSDTrainProcess", "restore_scheduler_state", print_acc=messages.append)
+    # e.g. switched from cosine to a warmup schedule before resuming
+    process = SimpleNamespace(_resume_checkpoint_path="model.safetensors",
+                              lr_scheduler=torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 1.0))
+    assert restore(process, state, optimizer) is False
+    assert messages and messages[0].startswith("WARNING: Could not restore the LR scheduler state")
+    process.lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=10)
+    assert restore(process, state, optimizer) is True
 
 
 def save_method():
@@ -411,6 +591,47 @@ def test_anima_attention_reaches_both_components_and_block_paths_resolve():
         expected = module[0](inputs)
         module[0] = torch.compile(module[0], backend="eager")
         torch.testing.assert_close(module[0](inputs), expected)
+
+
+@pytest.mark.parametrize("train_text_conditioner", [False, True])
+def test_anima_quantizes_transformer_blocks_one_at_a_time(monkeypatch, train_text_conditioner):
+    monkeypatch.setitem(sys.modules, "toolkit.dequantize",
+                        SimpleNamespace(patch_dequantization_on_save=lambda model: None))
+    quantized, messages = [], []
+    quantize_model = source_object(
+        QUANTIZE, None, "quantize_model", torch=torch, get_qtype=lambda qtype: qtype,
+        tqdm=lambda items: items, freeze=lambda module: None, print_acc=messages.append,
+        quantize=lambda module, weights, exclude=None: quantized.append(module),
+    )
+    anima = SimpleNamespace(
+        train_text_conditioner=train_text_conditioner, device_torch=torch.device("cpu"),
+        torch_dtype=torch.float32, model_config=SimpleNamespace(accuracy_recovery_adapter=None, qtype="qfloat8"),
+        get_quantization_exclude_modules=lambda: None, print_and_status_update=messages.append,
+    )
+    for method in ("get_transformer_block_names", "get_quantization_block_names"):
+        setattr(anima, method, MethodType(source_object(ANIMA, "AnimaModel", method), anima))
+    # load_model() quantizes the bare Cosmos transformer, before AnimaTrainableModel wraps it.
+    transformer = torch.nn.Module()
+    transformer.transformer_blocks = torch.nn.ModuleList([torch.nn.Linear(2, 2), torch.nn.Linear(2, 2)])
+
+    quantize_model(anima, transformer, block_names=anima.get_quantization_block_names())
+    assert quantized == [*transformer.transformer_blocks, transformer]
+    assert " - quantizing 2 transformer blocks" in messages
+    assert not any("WARNING" in message for message in messages)
+
+    # The wrapper-relative names cannot resolve on the bare transformer and now say so.
+    quantized.clear()
+    messages.clear()
+    quantize_model(anima, transformer)
+    assert quantized == [transformer]
+    assert any("block path 'transformer.transformer_blocks' not found" in message for message in messages)
+
+    tree = ast.parse((ROOT / ANIMA).read_text(encoding="utf-8"))
+    anima_class = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "AnimaModel")
+    load_model = next(node for node in anima_class.body if isinstance(node, ast.FunctionDef) and node.name == "load_model")
+    calls = [ast.unparse(node) for node in ast.walk(load_model)
+             if isinstance(node, ast.Call) and ast.unparse(node.func) == "quantize_model"]
+    assert calls == ["quantize_model(self, transformer, block_names=self.get_quantization_block_names())"]
 
 
 def test_anima_prediction_uses_prepared_model_forward():

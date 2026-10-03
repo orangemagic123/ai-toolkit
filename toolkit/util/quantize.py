@@ -229,7 +229,10 @@ def quantize(
 def quantize_model(
     base_model: "BaseModel",
     model_to_quantize: torch.nn.Module,
+    block_names: Optional[List[str]] = None,
 ):
+    # block_names are dotted paths relative to model_to_quantize. They default to
+    # base_model.get_transformer_block_names(), which is relative to the trained model.
     from toolkit.dequantize import patch_dequantization_on_save
 
     if not hasattr(base_model, "get_transformer_block_names"):
@@ -396,7 +399,9 @@ def quantize_model(
         quantization_type = get_qtype(base_model.model_config.qtype)
         # all_blocks = list(model_to_quantize.transformer_blocks)
         all_blocks: List[torch.nn.Module] = []
-        transformer_block_names = base_model.get_transformer_block_names()
+        transformer_block_names = block_names
+        if transformer_block_names is None:
+            transformer_block_names = base_model.get_transformer_block_names()
         for name in transformer_block_names:
             # name may be a dotted path for models that nest their blocks
             # (e.g. hidream_o1's "model.language_model.layers").
@@ -407,6 +412,8 @@ def quantize_model(
                     break
             if block_list is not None:
                 all_blocks += list(block_list)
+            else:
+                print_acc(f" - WARNING: block path '{name}' not found; its layers will be quantized with the extras")
         base_model.print_and_status_update(
             f" - quantizing {len(all_blocks)} transformer blocks"
         )

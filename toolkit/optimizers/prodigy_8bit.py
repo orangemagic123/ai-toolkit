@@ -100,6 +100,40 @@ class Prodigy8bit(Optimizer):
     def supports_flat_params(self):
         return True
 
+    def state_dict(self):
+        state_dict = super().state_dict()
+        # Store Auto8bitTensor values as plain tensors so the state can be loaded with
+        # torch.load(weights_only=True). Build new per-parameter dicts because
+        # Optimizer.state_dict() returns references to the live state.
+        state_dict['state'] = {
+            param_id: {
+                key: {'_type': 'Auto8bitTensor', 'state': value.state_dict()}
+                if isinstance(value, Auto8bitTensor) else value
+                for key, value in param_state.items()
+            }
+            for param_id, param_state in state_dict['state'].items()
+        }
+        return state_dict
+
+    def load_state_dict(self, state_dict):
+        # Rebuild Auto8bitTensor values first: Optimizer.load_state_dict would cast their
+        # int8 data to the param dtype and turn the '_type' string into a generator repr.
+        state_dict = dict(state_dict)
+        state_dict['state'] = {
+            param_id: {
+                key: Auto8bitTensor(value['state'])
+                if isinstance(value, dict) and value.get('_type') == 'Auto8bitTensor' else value
+                for key, value in param_state.items()
+            }
+            for param_id, param_state in state_dict['state'].items()
+        }
+        super().load_state_dict(state_dict)
+        # Optimizer.load_state_dict only moves tensors it can see.
+        for param, param_state in self.state.items():
+            for value in param_state.values():
+                if isinstance(value, Auto8bitTensor):
+                    value.quantized = value.quantized.to(param.device)
+
     def step_hook(self):
         if not self.is_stochastic_rounding_accumulation:
             return

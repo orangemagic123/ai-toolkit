@@ -195,8 +195,7 @@ class DiffusionTrainer(SDTrainer):
             if self.progress_bar is not None:
                 self.progress_bar.pause()
             print_acc(f"\nSaving at step {self.step_num}")
-            # clear any grads
-            self.optimizer.zero_grad()
+            # Pending gradients belong to the current accumulation window.
             self.save(self.step_num)
             self.ensure_params_requires_grad()
             flush()
@@ -224,8 +223,7 @@ class DiffusionTrainer(SDTrainer):
             if self.progress_bar is not None:
                 self.progress_bar.pause()
             print_acc(f"\nSampling at step {self.step_num}")
-            # clear any grads
-            self.optimizer.zero_grad()
+            # Pending gradients belong to the current accumulation window.
             if self.train_config.free_u:
                 self.sd.pipeline.disable_freeu()
             self.sample(self.step_num)
