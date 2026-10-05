@@ -494,6 +494,25 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'datasets.protected_caption_dropout_rate': {
+    title: 'Protected Caption Dropout Rate',
+    description: (
+      <>
+        The probability that a training step uses only the protected part of the caption: the text before Keep Tokens
+        Separator and the first Keep First Tags tags. Everything else is removed for that step, including
+        natural-language captions in mixed mode. With <code>|||</code> configured,{' '}
+        <code>1girl, charA, @styleX ||| red hair, smile, outdoors</code> trains as <code>1girl, charA, @styleX</code>{' '}
+        at this rate. This binds each image to the concept tags it carries, which suits LoRAs with several characters
+        or styles better than a blank caption or a single shared trigger word. Captions with nothing protected fall back
+        to the normal dropout caption (blank, or the trigger word alone).
+        <br />
+        <br />
+        This shares one random roll with Caption Dropout Rate, so the two rates are exclusive and their sum cannot
+        exceed 1. For example, <code>0.02</code> and <code>0.08</code> give 2% blank steps and 8% protected-only steps.
+        Like Caption Dropout Rate, it works when caching text embeddings.
+      </>
+    ),
+  },
 };
 
 export const getDoc = (key: string | null | undefined): ConfigDoc | null => {

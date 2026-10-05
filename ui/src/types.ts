@@ -116,6 +116,7 @@ export interface DatasetConfig {
   default_caption: string;
   caption_ext: string;
   caption_dropout_rate: number;
+  protected_caption_dropout_rate?: number;
   caption_mode?: 'single' | 'mixed';
   mixed_weights?: {
     tags: number;
