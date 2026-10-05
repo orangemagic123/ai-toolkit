@@ -17,6 +17,7 @@ export const defaultDatasetConfig: DatasetConfig = {
   default_caption: '',
   caption_ext: 'txt',
   caption_dropout_rate: 0.05,
+  protected_caption_dropout_rate: 0,
   caption_mode: 'single',
   mixed_weights: { ...defaultMixedCaptionWeights },
   token_dropout_rate: 0,

@@ -441,14 +441,38 @@ class CaptionProcessingDTOMixin:
             trigger=None,
             to_replace_list=None,
             add_if_not_present=False,
+            drop_unprotected=False,
     ):
         """Process only the tag section of a selected mixed caption."""
         selection = self.mixed_caption_selection
         protected_tags = selection.protected_tags
-        processable_tags = selection.processable_tags if selection.includes_tags else ''
-        nl_caption = selection.nl_caption if selection.includes_nl else ''
+        if drop_unprotected:
+            # Every variant collapses to the protected tags, so the result does not
+            # depend on which variant was selected.
+            processable_tags = drop_caption_tags(
+                selection.processable_tags,
+                1.0,
+                self.dataset_config.keep_tokens,
+                self.dataset_config.secondary_separator,
+            )
+            nl_caption = ''
+            if not protected_tags.strip() and not processable_tags.strip():
+                # nothing protected: use the exact blank dropout caption
+                return inject_trigger_into_prompt(
+                    '',
+                    trigger,
+                    list(to_replace_list) if to_replace_list is not None else None,
+                    add_if_not_present,
+                )
+        else:
+            processable_tags = selection.processable_tags if selection.includes_tags else ''
+            nl_caption = selection.nl_caption if selection.includes_nl else ''
 
-        if self.dataset_config.token_dropout_rate > 0 and not self.dataset_config.cache_text_embeddings:
+        if (
+            not drop_unprotected
+            and self.dataset_config.token_dropout_rate > 0
+            and not self.dataset_config.cache_text_embeddings
+        ):
             processable_tags = drop_caption_tags(
                 processable_tags,
                 self.dataset_config.token_dropout_rate,
@@ -497,7 +521,7 @@ class CaptionProcessingDTOMixin:
                 processable_tags = prepend_trigger(processable_tags)
 
         extra_tags = ''
-        if self.dataset_config.random_triggers:
+        if self.dataset_config.random_triggers and not drop_unprotected:
             num_triggers = self.dataset_config.random_triggers_max
             if num_triggers > 1:
                 num_triggers = random.randint(0, num_triggers)
@@ -511,7 +535,8 @@ class CaptionProcessingDTOMixin:
         # those values separate from the protected NL sentence.
         processable_tags = join_caption_sections(processable_tags, extra_tags)
 
-        if self.dataset_config.shuffle_caption:
+        # Protected-only captions stay unshuffled so cached embeddings match.
+        if self.dataset_config.shuffle_caption and not drop_unprotected:
             processable_tags = shuffle_caption_tags(
                 processable_tags,
                 self.dataset_config.secondary_separator,
@@ -526,6 +551,8 @@ class CaptionProcessingDTOMixin:
             self.dataset_config.secondary_separator,
         )
 
+        if drop_unprotected:
+            return join_caption_sections(protected_tags, processable_tags)
         if selection.variant == 'nl':
             return selection.render_processed(
                 protected_tags,
@@ -544,8 +571,11 @@ class CaptionProcessingDTOMixin:
             trigger=None,
             to_replace_list=None,
             add_if_not_present=False,
-            short_caption=False
+            short_caption=False,
+            drop_unprotected=None,
     ):
+        # drop_unprotected=None rolls caption dropout. True/False skip the roll,
+        # which lets the text embedding cache build the protected-only caption.
         if trigger is None and self.trigger_word is not None:
             trigger = self.trigger_word
         
@@ -560,26 +590,45 @@ class CaptionProcessingDTOMixin:
         if raw_caption is None:
             raw_caption = ''
         # handle dropout
-        if self.dataset_config.caption_dropout_rate > 0 and not short_caption and not self.dataset_config.cache_text_embeddings:
-            # get a random float form 0 to 1
-            rand = random.random()
-            if rand < self.dataset_config.caption_dropout_rate:
-                # drop the caption
-                return ''
+        if drop_unprotected is None:
+            drop_unprotected = False
+            blank_rate = self.dataset_config.caption_dropout_rate
+            protected_rate = self.dataset_config.protected_caption_dropout_rate
+            if (blank_rate > 0 or protected_rate > 0) and not short_caption and not self.dataset_config.cache_text_embeddings:
+                # get a random float form 0 to 1. One roll keeps the blank and
+                # protected-only rates exclusive.
+                rand = random.random()
+                if rand < blank_rate:
+                    # drop the caption
+                    return ''
+                drop_unprotected = rand < blank_rate + protected_rate
 
         if self.mixed_caption_selection is not None and not short_caption:
             return self._get_mixed_caption(
                 trigger,
                 to_replace_list,
                 add_if_not_present,
+                drop_unprotected=drop_unprotected,
             )
 
         protected_caption, processable_caption, has_keep_separator = split_caption_at_separator(
             raw_caption, self.dataset_config.keep_tokens_separator
         )
 
+        if drop_unprotected:
+            # Keep only what tag dropout can never remove: the separator prefix
+            # and the first keep_tokens tags.
+            processable_caption = drop_caption_tags(
+                processable_caption,
+                1.0,
+                self.dataset_config.keep_tokens,
+                self.dataset_config.secondary_separator,
+            )
+            if not protected_caption.strip() and not processable_caption.strip():
+                # nothing protected: use the exact blank dropout caption
+                return inject_trigger_into_prompt('', trigger, to_replace_list, add_if_not_present)
         # handle token dropout
-        if self.dataset_config.token_dropout_rate > 0 and not short_caption and not self.dataset_config.cache_text_embeddings:
+        elif self.dataset_config.token_dropout_rate > 0 and not short_caption and not self.dataset_config.cache_text_embeddings:
             # Only tags after keep_tokens_separator participate in token dropout.
             processable_caption = drop_caption_tags(
                 processable_caption,
@@ -602,7 +651,7 @@ class CaptionProcessingDTOMixin:
                 caption, self.dataset_config.keep_tokens_separator
             )
 
-        if self.dataset_config.random_triggers:
+        if self.dataset_config.random_triggers and not drop_unprotected:
             num_triggers = self.dataset_config.random_triggers_max
             if num_triggers > 1:
                 num_triggers = random.randint(0, num_triggers)
@@ -616,7 +665,8 @@ class CaptionProcessingDTOMixin:
                 #     trigger = self.dataset_config.random_triggers[int(random.random() * (len(self.dataset_config.random_triggers)))]
                 #     caption = caption + ', ' + trigger
 
-        if self.dataset_config.shuffle_caption:
+        # Protected-only captions stay unshuffled so cached embeddings match.
+        if self.dataset_config.shuffle_caption and not drop_unprotected:
             # When a separator is present, caption contains only its processable
             # section here, leaving protected_caption untouched.
             caption = shuffle_caption_tags(caption, self.dataset_config.secondary_separator)
@@ -2371,13 +2421,19 @@ class TextEmbeddingFileItemDTOMixin:
         self._blank_text_embedding_path: Union[str, None] = None
         # DOP embeds for dropout steps (dropout caption with trigger replaced by class)
         self._dop_blank_text_embedding_path: Union[str, None] = None
+        # protected-only caption embeds (and their DOP / D-OPSD variants) used for
+        # protected caption dropout when caching text embeddings
+        self._protected_text_embedding_path: Union[str, None] = None
+        self._dop_protected_text_embedding_path: Union[str, None] = None
+        self._dopsd_protected_text_embedding_path: Union[str, None] = None
         # D-OPSD teacher embeds (caption with trigger replaced by the self-reference
         # token, encoded WITH the item's own image/video as the vision reference)
         self.dopsd_prompt_embeds: Union[PromptEmbeds, None] = None
         self._dopsd_text_embedding_path: Union[str, None] = None
         self._dopsd_blank_text_embedding_path: Union[str, None] = None
         self._loaded_text_embedding_path: Union[str, None] = None
-        self._caption_was_dropped = False
+        # None, 'blank' or 'protected' for the embedding currently loaded
+        self._caption_dropout_kind: Union[str, None] = None
         self.is_text_embedding_cached = False
         self.text_embedding_load_device = 'cpu'
         self.text_embedding_version = 1
@@ -2532,6 +2588,56 @@ class TextEmbeddingFileItemDTOMixin:
 
         return self._blank_text_embedding_path
 
+    def get_protected_dropout_caption(self: 'FileItemDTO'):
+        # the caption a live protected-only dropout step builds. With the roll
+        # skipped there is nothing random left in it, so it can be cached.
+        if self.caption is None:
+            self.load_caption()
+        return self.get_caption(drop_unprotected=True)
+
+    def get_dop_protected_dropout_caption(self: 'FileItemDTO'):
+        # live encoding builds the DOP caption from the protected-only caption
+        protected_caption = self.get_protected_dropout_caption()
+        if self.trigger_word is not None:
+            return protected_caption.replace(
+                self.trigger_word, self.dataset_config.diff_output_preservation_class
+            )
+        return protected_caption
+
+    def get_dopsd_protected_dropout_caption(self: 'FileItemDTO'):
+        protected_caption = self.get_protected_dropout_caption()
+        if self.trigger_word is not None:
+            return protected_caption.replace(
+                self.trigger_word, self.get_dopsd_ref_token()
+            )
+        return f"{self.get_dopsd_ref_token()} {protected_caption}".strip()
+
+    def get_protected_text_embedding_path(self: 'FileItemDTO', recalculate=False):
+        if self._protected_text_embedding_path is not None and not recalculate:
+            return self._protected_text_embedding_path
+        # a shortened caption, so it keeps the control conditioning of the full one.
+        # If nothing was droppable, this shares the normal embedding's cache file.
+        self._protected_text_embedding_path = self._build_text_embedding_path(
+            caption_override=self.get_protected_dropout_caption()
+        )
+        return self._protected_text_embedding_path
+
+    def get_dop_protected_text_embedding_path(self: 'FileItemDTO', recalculate=False):
+        if self._dop_protected_text_embedding_path is not None and not recalculate:
+            return self._dop_protected_text_embedding_path
+        self._dop_protected_text_embedding_path = self._build_text_embedding_path(
+            caption_override=self.get_dop_protected_dropout_caption()
+        )
+        return self._dop_protected_text_embedding_path
+
+    def get_dopsd_protected_text_embedding_path(self: 'FileItemDTO', recalculate=False):
+        if self._dopsd_protected_text_embedding_path is not None and not recalculate:
+            return self._dopsd_protected_text_embedding_path
+        self._dopsd_protected_text_embedding_path = self._build_text_embedding_path(
+            caption_override=self.get_dopsd_protected_dropout_caption(), dopsd_self_ref=True
+        )
+        return self._dopsd_protected_text_embedding_path
+
     def cleanup_text_embedding(self):
         if self.prompt_embeds is not None:
             # we are caching on disk, don't save in memory
@@ -2546,22 +2652,29 @@ class TextEmbeddingFileItemDTOMixin:
             return
         if self.prompt_embeds is None:
             te_path = self.get_text_embedding_path()
-            self._caption_was_dropped = False
-            if self.dataset_config.caption_dropout_rate > 0:
-                # get a random float form 0 to 1
+            self._caption_dropout_kind = None
+            blank_rate = self.dataset_config.caption_dropout_rate
+            protected_rate = self.dataset_config.protected_caption_dropout_rate
+            if blank_rate > 0 or protected_rate > 0:
+                # get a random float form 0 to 1. Same single roll as live encoding.
                 rand = random.random()
-                if rand < self.dataset_config.caption_dropout_rate:
+                if rand < blank_rate:
                     # drop the caption by using the cached blank embedding
                     te_path = self.get_blank_text_embedding_path()
-                    self._caption_was_dropped = True
+                    self._caption_dropout_kind = 'blank'
+                elif rand < blank_rate + protected_rate:
+                    te_path = self.get_protected_text_embedding_path()
+                    self._caption_dropout_kind = 'protected'
             # load it from disk
             self.prompt_embeds = PromptEmbeds.load(te_path)
             self._loaded_text_embedding_path = te_path
         if self.dataset_config.diff_output_preservation and self.dop_prompt_embeds is None:
-            if self._caption_was_dropped:
+            if self._caption_dropout_kind == 'blank':
                 # match live encoding, which builds the DOP caption from the
                 # dropped caption (trigger word replaced with the class)
                 dop_path = self.get_dop_blank_text_embedding_path()
+            elif self._caption_dropout_kind == 'protected':
+                dop_path = self.get_dop_protected_text_embedding_path()
             else:
                 dop_path = self.get_dop_text_embedding_path()
             if dop_path == self._loaded_text_embedding_path:
@@ -2570,8 +2683,10 @@ class TextEmbeddingFileItemDTOMixin:
             else:
                 self.dop_prompt_embeds = PromptEmbeds.load(dop_path)
         if getattr(self, 'dopsd_self_ref', False) and self.dopsd_prompt_embeds is None:
-            if self._caption_was_dropped:
+            if self._caption_dropout_kind == 'blank':
                 dopsd_path = self.get_dopsd_blank_text_embedding_path()
+            elif self._caption_dropout_kind == 'protected':
+                dopsd_path = self.get_dopsd_protected_text_embedding_path()
             else:
                 dopsd_path = self.get_dopsd_text_embedding_path()
             self.dopsd_prompt_embeds = PromptEmbeds.load(dopsd_path)
@@ -2617,6 +2732,21 @@ class TextEmbeddingCachingMixin:
                         if dop_blank_path not in [t[0] for t in encode_targets] + [text_embedding_path]:
                             encode_targets.append((dop_blank_path, file_item.get_dop_dropout_caption()))
                             dropout_target_paths.add(dop_blank_path)
+                if self.dataset_config.protected_caption_dropout_rate > 0:
+                    # protected-only captions encode like normal captions (with control
+                    # conditioning), so they stay out of dropout_target_paths
+                    protected_targets = [(
+                        file_item.get_protected_text_embedding_path(recalculate=True),
+                        file_item.get_protected_dropout_caption(),
+                    )]
+                    if self.dataset_config.diff_output_preservation:
+                        protected_targets.append((
+                            file_item.get_dop_protected_text_embedding_path(recalculate=True),
+                            file_item.get_dop_protected_dropout_caption(),
+                        ))
+                    for target in protected_targets:
+                        if target[0] not in [t[0] for t in encode_targets]:
+                            encode_targets.append(target)
                 # only process if not saved to disk
                 encode_targets = [t for t in encode_targets if not os.path.exists(t[0])]
                 if len(encode_targets) > 0:
@@ -2736,6 +2866,10 @@ class TextEmbeddingCachingMixin:
                         dopsd_blank_path = file_item.get_dopsd_blank_text_embedding_path(recalculate=True)
                         if dopsd_blank_path != dopsd_targets[0][0]:
                             dopsd_targets.append((dopsd_blank_path, file_item.get_dopsd_dropout_caption()))
+                    if self.dataset_config.protected_caption_dropout_rate > 0:
+                        dopsd_protected_path = file_item.get_dopsd_protected_text_embedding_path(recalculate=True)
+                        if dopsd_protected_path not in [t[0] for t in dopsd_targets]:
+                            dopsd_targets.append((dopsd_protected_path, file_item.get_dopsd_protected_dropout_caption()))
                     dopsd_targets = [t for t in dopsd_targets if not os.path.exists(t[0])]
                     if len(dopsd_targets) > 0:
                         if not did_move:

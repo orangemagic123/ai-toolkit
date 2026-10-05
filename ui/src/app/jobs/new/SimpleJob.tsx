@@ -1466,6 +1466,25 @@ export default function SimpleJob({
                         required
                       />
                       <NumberInput
+                        label="Protected Caption Dropout Rate"
+                        className="pt-2"
+                        docKey="datasets.protected_caption_dropout_rate"
+                        value={dataset.protected_caption_dropout_rate ?? 0}
+                        onChange={value =>
+                          setJobConfig(value, `config.process[0].datasets[${i}].protected_caption_dropout_rate`)
+                        }
+                        placeholder="eg. 0.08"
+                        min={0}
+                        max={1}
+                        required
+                      />
+                      {(dataset.protected_caption_dropout_rate ?? 0) > 0 &&
+                        (dataset.caption_dropout_rate ?? 0) + (dataset.protected_caption_dropout_rate ?? 0) > 1 && (
+                          <p className="pt-2 text-sm text-red-500">
+                            Caption Dropout Rate + Protected Caption Dropout Rate cannot exceed 1.
+                          </p>
+                        )}
+                      <NumberInput
                         label="Caption Tag Dropout Rate"
                         className="pt-2"
                         value={dataset.token_dropout_rate ?? 0}

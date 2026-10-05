@@ -1038,6 +1038,26 @@ class DatasetConfig:
         )
         self.shuffle_tokens: bool = self.shuffle_caption
         self.caption_dropout_rate: float = float(kwargs.get('caption_dropout_rate', 0.0))
+        # chance to train a step on only the protected tags (text before
+        # keep_tokens_separator plus the first keep_tokens tags). Drawn from the same
+        # roll as caption_dropout_rate, so the two rates are exclusive.
+        self.protected_caption_dropout_rate: float = float(
+            kwargs.get('protected_caption_dropout_rate', 0.0)
+        )
+        if not 0.0 <= self.protected_caption_dropout_rate <= 1.0:
+            raise ValueError('protected_caption_dropout_rate must be between 0 and 1')
+        if self.protected_caption_dropout_rate > 0:
+            # the protected band starts where the blank band ends, so a negative or
+            # NaN blank rate would shift it. Configs without the option are unchanged.
+            if not 0.0 <= self.caption_dropout_rate <= 1.0:
+                raise ValueError(
+                    'caption_dropout_rate must be between 0 and 1 when '
+                    'protected_caption_dropout_rate is set'
+                )
+            if self.caption_dropout_rate + self.protected_caption_dropout_rate > 1.0:
+                raise ValueError(
+                    'caption_dropout_rate + protected_caption_dropout_rate cannot exceed 1'
+                )
         self.keep_tokens: int = kwargs.get('keep_tokens', 0)  # #of first tokens to always keep unless caption dropped
         self.keep_tokens_separator: str = kwargs.get('keep_tokens_separator', None)
         if self.keep_tokens_separator == '':
