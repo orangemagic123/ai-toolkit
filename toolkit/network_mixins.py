@@ -13,6 +13,7 @@ from tqdm import tqdm
 from toolkit.config_modules import NetworkConfig
 from toolkit.lorm import extract_conv, extract_linear, count_parameters
 from toolkit.metadata import add_model_hash_to_meta
+from toolkit.nora import NORA_LOAD_TOLERANCE, column_norm_deviation, normalize_down_weight
 from toolkit.paths import KEYMAPS_ROOT
 from toolkit.saving import get_lora_keymap_from_model_keymap
 from optimum.quanto import QBytesTensor
@@ -194,6 +195,21 @@ class ToolkitModuleMixin:
             with torch.no_grad():
                 runtime_scale.fill_(self.scale)
 
+    def _get_lora_down_weight(self: Module) -> torch.Tensor:
+        """A as the forward pass sees it: Norm(A) for continuous NoRA, else the raw weight."""
+        if getattr(self, 'nora_mode', 'off') == 'continuous':
+            return normalize_down_weight(self.lora_down.weight)
+        return self.lora_down.weight
+
+    def _lora_down_forward(self: Module, x):
+        down = self.lora_down
+        if getattr(self, 'nora_mode', 'off') != 'continuous':
+            return down(x)
+        weight = normalize_down_weight(down.weight)
+        if isinstance(down, nn.Conv2d):
+            return down._conv_forward(x, weight, down.bias)
+        return nn.functional.linear(x, weight, down.bias)
+
     def _call_forward(self: Module, x):
         # module dropout
         if self.module_dropout is not None and self.training:
@@ -204,7 +220,7 @@ class ToolkitModuleMixin:
             lx = self.lora_mid(self.lora_down(x))
         else:
             try:
-                lx = self.lora_down(x)
+                lx = self._lora_down_forward(x)
             except RuntimeError as e:
                 print(f"Error in {self.__class__.__name__} lora_down")
                 raise e
@@ -331,7 +347,7 @@ class ToolkitModuleMixin:
                 lx = torch.nn.functional.dropout(x, p=self.dropout)
             else:
                 lx = x
-            lora_weight = self.lora_up.weight @ self.lora_down.weight
+            lora_weight = self.lora_up.weight @ self._get_lora_down_weight()
             # scale it here
             # todo handle our batch split scalers for slider training. For now take the mean of them
             scale = multiplier.mean()
@@ -376,7 +392,7 @@ class ToolkitModuleMixin:
             up_weight = None
         else:
             up_weight = self.lora_up.weight.clone().float()
-        down_weight = self.lora_down.weight.clone().float()
+        down_weight = self._get_lora_down_weight().clone().float()
 
         # a zero delta merges to identity: skip entirely. On quantized bases a
         # "merge" is dequantize -> add -> requantize, which is not lossless (the
@@ -590,6 +606,15 @@ class ToolkitNetworkMixin:
         state_dict = self.state_dict()
         save_dict = OrderedDict()
 
+        # continuous NoRA trains a raw A behind a normalization. Export Norm(A) so the
+        # file is an ordinary LoRA for every loader; the raw A stays in the training state.
+        for module in self.get_all_modules():
+            if getattr(module, 'nora_mode', 'off') == 'continuous':
+                key = f"{module.lora_name}.lora_down.weight"
+                if key not in state_dict:
+                    raise KeyError(f"NoRA export could not find {key} in the network state dict")
+                state_dict[key] = module._get_lora_down_weight().detach()
+
         for key in list(state_dict.keys()):
             v = state_dict[key]
             v = v.detach().clone().to("cpu").to(dtype)
@@ -796,9 +821,28 @@ class ToolkitNetworkMixin:
             return self.load_weights(file, force_weight_mapping=True)
 
         info = self.load_state_dict(load_sd, False)
+        self._warn_on_unnormalized_nora_load(load_sd)
         if len(extra_dict.keys()) == 0:
             extra_dict = None
         return extra_dict
+
+    def _warn_on_unnormalized_nora_load(self: Network, load_sd) -> None:
+        # Continuous NoRA exports Norm(A). Any other A is renormalized by the forward
+        # pass, so the loaded adapter no longer reproduces the file's output.
+        drifted = 0
+        for module in self.get_all_modules():
+            if getattr(module, 'nora_mode', 'off') != 'continuous':
+                continue
+            if f"{module.lora_name}.lora_down.weight" not in load_sd:
+                continue
+            if column_norm_deviation(module.lora_down.weight) > NORA_LOAD_TOLERANCE:
+                drifted += 1
+        if drifted > 0:
+            print(
+                f"WARNING: {drifted} loaded LoRA down weights do not have unit columns, so they were "
+                f"probably not trained with nora: continuous. The forward pass renormalizes them and "
+                f"the adapter output differs from the loaded file."
+            )
 
     @torch.no_grad()
     def _update_torch_multiplier(self: Network):

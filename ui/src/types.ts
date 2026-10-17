@@ -88,6 +88,7 @@ export interface MonitorInit extends MonitorSample {
 export interface NetworkConfig {
   type: string;
   use_dora?: boolean;
+  nora?: 'off' | 'init' | 'continuous';
   linear: number;
   linear_alpha: number;
   conv: number;

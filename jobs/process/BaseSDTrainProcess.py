@@ -49,6 +49,7 @@ from toolkit.lorm import convert_diffusers_unet_to_lorm, count_parameters, print
 from toolkit.lycoris_special import LycorisSpecialNetwork
 from toolkit.models.decorator import Decorator
 from toolkit.network_mixins import Network
+from toolkit.nora import check_nora_resume_mode, nora_resume_warning
 from toolkit.optimizer import get_optimizer
 from toolkit.paths import CONFIG_ROOT
 from toolkit.progress_bar import ToolkitProgressBar
@@ -433,6 +434,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
             'step': self.step_num,
             'epoch': self.epoch_num,
         })
+        nora_mode = getattr(self.network, 'nora_mode', 'off')
+        if nora_mode != 'off':
+            # resume compares this before restoring raw weights or optimizer state
+            info['nora_mode'] = nora_mode
         return info
 
     def clean_up_saves(self):
@@ -995,6 +1000,14 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     meta = yaml.load(f, Loader=yaml.FullLoader)
         else:
             meta = load_metadata_from_safetensors(path)
+        # merged full-model saves reset the adapter each save, so only adapter resumes are checked
+        if self.network is not None and not self.train_config.merge_network_on_save:
+            training_info = (meta or {}).get('training_info') or {}
+            check_nora_resume_mode(
+                training_info.get('nora_mode', 'off'),
+                getattr(self.network, 'nora_mode', 'off'),
+                path,
+            )
         # if 'training_info' in Orderdict keys
         if meta is not None and 'training_info' in meta and 'step' in meta['training_info'] and self.train_config.start_step is None:
             self.step_num = meta['training_info']['step']
@@ -2279,6 +2292,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
             self.optimizer.enable_paramiter_swapping(self.train_config.paramiter_swapping_factor)
 
         resume_state = self.restore_paired_training_state(optimizer)
+        if resume_state is None and self._resume_checkpoint_path is not None:
+            nora_warning = nora_resume_warning(self.network)
+            if nora_warning is not None:
+                print_acc(nora_warning)
         if resume_state is not None and self.train_config.start_step is None:
             self.step_num = resume_state["progress"]["step"]
             self.start_step = self.step_num

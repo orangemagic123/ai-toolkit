@@ -12,6 +12,7 @@ from toolkit.network_mixins import (
     ToolkitModuleMixin,
     broadcast_and_multiply,
 )
+from toolkit.nora import NORA_MODES, NoraMode, apply_nora_init_
 
 if TYPE_CHECKING:
     from toolkit.lora_special import LoRASpecialNetwork
@@ -52,6 +53,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         module_dropout=None,
         network: "LoRASpecialNetwork" = None,
         use_bias: bool = False,
+        nora_mode: NoraMode = "off",
         **kwargs,
     ):
         self.can_merge_in = False
@@ -84,7 +86,18 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         self.lora_up = nn.Linear(self.lora_dim, d_out, bias=False)  # lora_B
         self.lora_up.weight.data = torch.zeros_like(self.lora_up.weight.data)
         self.lora_down = nn.Linear(d_in, self.lora_dim, bias=False)  # lora_A
-        self.lora_down.weight.data = torch.randn_like(self.lora_down.weight.data) * std_dev
+        if nora_mode not in NORA_MODES:
+            raise ValueError(f"Unsupported NoRA mode {nora_mode!r} for {lora_name}")
+        self.nora_mode: NoraMode = nora_mode
+        if nora_mode == "continuous":
+            # The forward pass normalizes A, but the raw scale still sets how fast its
+            # direction trains under Adam. Keep the paper's kaiming scale rather than
+            # randn/sqrt(rank), whose columns already have unit norm on average.
+            nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
+        else:
+            self.lora_down.weight.data = torch.randn_like(self.lora_down.weight.data) * std_dev
+        if nora_mode == "init":
+            apply_nora_init_(self.lora_down.weight)
 
         self._set_runtime_scale(scale)
 
@@ -124,12 +137,13 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
     ) -> torch.Tensor:
         """Return ||W + scale * B @ A|| per output row without forming B @ A."""
         weight = self.get_orig_weight().to(device=device, dtype=compute_dtype)
+        lora_a = self._get_lora_down_weight()
 
         if use_autocast:
             with torch.autocast(device_type=device.type, dtype=compute_dtype):
-                weight_a_t = F.linear(weight, self.lora_down.weight)
+                weight_a_t = F.linear(weight, lora_a)
         else:
-            weight_a_t = F.linear(weight, self.lora_down.weight)
+            weight_a_t = F.linear(weight, lora_a)
 
         # Keep the large frozen weight in the model compute dtype. Only the
         # small rank-space reductions are accumulated in FP32 for stability.
@@ -138,7 +152,7 @@ class DoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             dim=1,
             dtype=torch.float32,
         ).square()
-        lora_a = self.lora_down.weight.float()
+        lora_a = lora_a.float()
         lora_b = self.lora_up.weight.float()
         weight_a_t = weight_a_t.float()
         gram = lora_a @ lora_a.transpose(0, 1)
