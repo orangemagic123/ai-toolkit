@@ -4,6 +4,7 @@ from typing import Dict, Optional, Tuple
 
 
 MIXED_CAPTION_VARIANTS = ('tags', 'nl', 'tags_nl', 'nl_tags')
+CAPTION_LENGTHS = ('short', 'medium', 'long')
 
 
 def _join_with_keep_separator(protected: str, processable: str, separator: str) -> str:
@@ -28,6 +29,7 @@ class MixedCaptionSelection:
     processable_tags: str
     nl_caption: str
     keep_tokens_separator: Optional[str] = None
+    is_structured: bool = False
 
     @property
     def includes_tags(self) -> bool:
@@ -56,7 +58,7 @@ class MixedCaptionSelection:
                 processable,
                 self.keep_tokens_separator,
             )
-        return processable
+        return _join_caption_parts(self.protected_tags, processable)
 
     def render_processed(
         self,
@@ -75,6 +77,77 @@ class MixedCaptionSelection:
         else:
             parts = (protected_tags, nl_caption, processable_tags, extra_tags)
         return _join_caption_parts(*parts)
+
+
+@dataclass(frozen=True)
+class StructuredCaption:
+    """MOSS captions plus distinct ordered protected and processable tag lists."""
+
+    keep_tags: Tuple[str, ...]
+    tags: Tuple[str, ...]
+    captions: Dict[str, str]
+
+    def _variants(self, mode, mixed_weights):
+        if mode != 'mixed' or not self.tags:
+            return ['nl']
+        return [name for name in MIXED_CAPTION_VARIANTS if mixed_weights[name] > 0]
+
+    def _selection(self, variant, length=None):
+        return MixedCaptionSelection(
+            variant=variant,
+            protected_tags=', '.join(self.keep_tags),
+            processable_tags=', '.join(self.tags),
+            nl_caption=self.captions[length] if length is not None else '',
+            is_structured=True,
+        )
+
+    def select(self, mode, mixed_weights, length_weights):
+        variants = self._variants(mode, mixed_weights)
+        variant = variants[0] if len(variants) == 1 else random.choices(
+            variants, weights=[mixed_weights[name] for name in variants], k=1,
+        )[0]
+        length = None
+        if variant != 'tags':
+            lengths = [name for name in CAPTION_LENGTHS if length_weights[name] > 0]
+            length = lengths[0] if len(lengths) == 1 else random.choices(
+                lengths, weights=[length_weights[name] for name in lengths], k=1,
+            )[0]
+        return self._selection(variant, length)
+
+    def selections(self, mode, mixed_weights, length_weights):
+        """Enumerate every enabled variant for text embedding precaching."""
+        for variant in self._variants(mode, mixed_weights):
+            if variant == 'tags':
+                yield self._selection(variant)
+            else:
+                for length in CAPTION_LENGTHS:
+                    if length_weights[length] > 0:
+                        yield self._selection(variant, length)
+
+
+def parse_structured_caption(value, source='caption JSON') -> StructuredCaption:
+    """Parse annotation JSON explicitly; unrelated raw JSON prompts stay untouched."""
+    if not isinstance(value, dict) or not isinstance(value.get('caption'), dict):
+        raise ValueError(f'{source}: expected a caption object with short, medium, long')
+    captions = {}
+    for length in CAPTION_LENGTHS:
+        text = value['caption'].get(length)
+        if not isinstance(text, str) or not text.strip():
+            raise ValueError(f'{source}: caption.{length} must be a non-empty string')
+        # Preserve visible text and line breaks exactly as stored in the JSON.
+        captions[length] = text
+
+    def read_tags(key):
+        tags = value.get(key, [])
+        if not isinstance(tags, list) or any(
+            not isinstance(tag, str) or not tag.strip() for tag in tags
+        ):
+            raise ValueError(f'{source}: {key} must be an array of non-empty strings')
+        return tuple(dict.fromkeys(tag.strip() for tag in tags))
+
+    keep_tags = read_tags('keep_tags')
+    tags = tuple(tag for tag in read_tags('tags') if tag not in keep_tags)
+    return StructuredCaption(keep_tags, tags, captions)
 
 
 def select_mixed_caption_selection(

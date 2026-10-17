@@ -1,0 +1,11 @@
+{
+  "caption": {
+    "short": "A smiling woman in a garden.",
+    "medium": "A smiling woman with blue eyes stands in a garden.",
+    "long": "A smiling woman with blue eyes stands in a garden. Soft daylight illuminates her face and green foliage fills the background."
+  },
+  "watermark": [],
+  "borders": ["none"],
+  "keep_tags": ["existing_trigger"],
+  "tags": ["smile"]
+}

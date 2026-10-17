@@ -27,6 +27,7 @@ from toolkit.caption_utils import (
     drop_caption_tags,
     expand_secondary_separator,
     join_caption_sections,
+    parse_structured_caption,
     select_mixed_caption_selection,
     shuffle_caption_tags,
     split_caption_at_separator,
@@ -335,6 +336,7 @@ class CaptionProcessingDTOMixin:
             self.caption_short: str = None
             self.mixed_caption_selection: Union[MixedCaptionSelection, None] = None
             self.mixed_caption_sources: Union[tuple, None] = None
+            self.structured_caption_source = None
             # caption with the trigger word replaced by the diff output preservation class
             self.caption_dop: str = None
             # D-OPSD teacher caption (trigger word replaced by <Picture 1>/<Video 1>)
@@ -346,7 +348,25 @@ class CaptionProcessingDTOMixin:
 
     # todo allow for loading from sd-scripts style dict
     def load_caption(self: 'FileItemDTO', caption_dict: Union[dict, None]=None):
-        if self.raw_caption is not None:
+        if getattr(self.dataset_config, 'caption_format', 'text') == 'moss_json':
+            if getattr(self, 'structured_caption_source', None) is None:
+                if caption_dict is not None and self.path in caption_dict:
+                    value = caption_dict[self.path]
+                    source = self.path
+                else:
+                    source = os.path.splitext(self.path)[0] + self.dataset_config.caption_ext
+                    try:
+                        with open(source, 'r', encoding='utf-8-sig') as f:
+                            value = json.load(f)
+                    except (OSError, ValueError) as exc:
+                        raise ValueError(f'Unable to read MOSS caption JSON {source}: {exc}') from exc
+                self.structured_caption_source = parse_structured_caption(value, source)
+            self._set_structured_caption_selection(self.structured_caption_source.select(
+                self.dataset_config.caption_mode,
+                self.dataset_config.mixed_weights,
+                self.dataset_config.caption_length_weights,
+            ))
+        elif self.raw_caption is not None:
             # Sidecar contents are cached on the DTO, but mixed variants must
             # be selected again every time the item is loaded so configured
             # weights apply throughout training instead of only once.
@@ -431,6 +451,24 @@ class CaptionProcessingDTOMixin:
                 )
             else:
                 self.caption_dopsd = f"{self.get_dopsd_ref_token()} {self.caption}".strip()
+
+    def _set_structured_caption_selection(self, selection):
+        self.mixed_caption_selection = selection
+        self.mixed_caption_sources = None
+        self.raw_caption = selection.render()
+        self.raw_caption_short = None
+        self.caption_short = None
+        # The next load must use the selected caption's embedding, including its
+        # preservation/dropout variants, rather than a previously memoized path.
+        for name in (
+            '_text_embedding_path', '_dop_text_embedding_path',
+            '_protected_text_embedding_path', '_dop_protected_text_embedding_path',
+            '_dopsd_text_embedding_path', '_dopsd_protected_text_embedding_path',
+        ):
+            setattr(self, name, None)
+        self.prompt_embeds = None
+        self.dop_prompt_embeds = None
+        self.dopsd_prompt_embeds = None
 
     def get_dopsd_ref_token(self: 'FileItemDTO') -> str:
         # the item is always the only reference in D-OPSD mode
@@ -546,10 +584,11 @@ class CaptionProcessingDTOMixin:
             processable_tags,
             self.dataset_config.secondary_separator,
         )
-        protected_tags = expand_secondary_separator(
-            protected_tags,
-            self.dataset_config.secondary_separator,
-        )
+        if not selection.is_structured:
+            protected_tags = expand_secondary_separator(
+                protected_tags,
+                self.dataset_config.secondary_separator,
+            )
 
         if drop_unprotected:
             return join_caption_sections(protected_tags, processable_tags)
@@ -2698,6 +2737,55 @@ class TextEmbeddingCachingMixin:
             super().__init__(**kwargs)
         self.is_caching_text_embeddings = self.dataset_config.cache_text_embeddings
 
+    def _iter_caption_cache_items(self):
+        """Cache all enabled JSON choices; restore each item's training state."""
+        for file_item in self.file_list:
+            if file_item.caption is None:
+                if getattr(self, 'caption_dict', None) is None:
+                    file_item.load_caption()
+                else:
+                    file_item.load_caption(self.caption_dict)
+            source = getattr(file_item, 'structured_caption_source', None)
+            if source is None:
+                yield file_item
+                continue
+            fields = (
+                'mixed_caption_selection', 'raw_caption', 'caption',
+                'caption_dop', 'caption_dopsd',
+            )
+            saved = {name: getattr(file_item, name, None) for name in fields}
+            was_cached = file_item.is_text_embedding_cached
+            completed = False
+            try:
+                config = file_item.dataset_config
+                for selection in source.selections(
+                    config.caption_mode, config.mixed_weights, config.caption_length_weights,
+                ):
+                    file_item._set_structured_caption_selection(selection)
+                    # Image/control encoding must not try to load this variant's
+                    # embedding before the variant has been written to disk.
+                    file_item.is_text_embedding_cached = False
+                    file_item.caption = file_item.get_caption(drop_unprotected=False)
+                    file_item.caption_dop = file_item.caption
+                    if config.diff_output_preservation and file_item.trigger_word is not None:
+                        file_item.caption_dop = file_item.caption.replace(
+                            file_item.trigger_word, config.diff_output_preservation_class,
+                        )
+                    if getattr(file_item, 'dopsd_self_ref', False):
+                        if file_item.trigger_word is not None:
+                            file_item.caption_dopsd = file_item.caption.replace(
+                                file_item.trigger_word, file_item.get_dopsd_ref_token(),
+                            )
+                        else:
+                            file_item.caption_dopsd = f'{file_item.get_dopsd_ref_token()} {file_item.caption}'.strip()
+                    yield file_item
+                completed = True
+            finally:
+                file_item._set_structured_caption_selection(saved['mixed_caption_selection'])
+                for name, value in saved.items():
+                    setattr(file_item, name, value)
+                file_item.is_text_embedding_cached = completed or was_cached
+
     def cache_text_embeddings(self: 'AiToolkitDataset'):
         with accelerator.main_process_first():
             print_acc(f"Caching text_embeddings for {self.dataset_path}")
@@ -2707,7 +2795,7 @@ class TextEmbeddingCachingMixin:
 
             # use tqdm to show progress
             i = 0
-            for file_item in tqdm(self.file_list, desc='Caching text embeddings to disk'):
+            for file_item in tqdm(self._iter_caption_cache_items(), desc='Caching text embeddings to disk'):
                 file_item.latent_load_device = self.sd.device
 
                 text_embedding_path = file_item.get_text_embedding_path(recalculate=True)

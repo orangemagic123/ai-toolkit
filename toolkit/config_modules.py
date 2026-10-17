@@ -994,7 +994,11 @@ class DatasetConfig:
                 random_triggers = [line for line in random_triggers if line.strip() != '']
         self.random_triggers: List[str] = random_triggers
         self.random_triggers_max: int = kwargs.get('random_triggers_max', 1)
-        self.caption_ext: str = kwargs.get('caption_ext', '.txt')
+        self.caption_format: str = str(kwargs.get('caption_format', 'text')).lower()
+        if self.caption_format not in ['text', 'moss_json']:
+            raise ValueError('caption_format must be text or moss_json')
+        default_caption_ext = '.json' if self.caption_format == 'moss_json' else '.txt'
+        self.caption_ext: str = kwargs.get('caption_ext', default_caption_ext)
         # if caption_ext doesnt start with a dot, add it
         if self.caption_ext and not self.caption_ext.startswith('.'):
             self.caption_ext = '.' + self.caption_ext
@@ -1031,6 +1035,27 @@ class DatasetConfig:
             raise ValueError('mixed_weights cannot contain negative values')
         if self.caption_mode == 'mixed' and mixed_weight_total <= 0:
             raise ValueError('mixed_weights must contain at least one positive value')
+        raw_length_weights = kwargs.get('caption_length_weights', {'short': 1, 'medium': 1, 'long': 1})
+        if not isinstance(raw_length_weights, dict):
+            raise ValueError('caption_length_weights must be a mapping')
+        if set(raw_length_weights) - {'short', 'medium', 'long'}:
+            raise ValueError('caption_length_weights only supports short, medium, long')
+        try:
+            self.caption_length_weights: Dict[str, float] = {
+                key: float(raw_length_weights.get(key, 0.0)) for key in ('short', 'medium', 'long')
+            }
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise ValueError('caption_length_weights must contain finite numeric values') from exc
+        length_total = sum(self.caption_length_weights.values())
+        if (
+            any(not math.isfinite(weight) for weight in self.caption_length_weights.values())
+            or not math.isfinite(length_total)
+        ):
+            raise ValueError('caption_length_weights must contain finite numeric values')
+        if any(weight < 0 for weight in self.caption_length_weights.values()):
+            raise ValueError('caption_length_weights cannot contain negative values')
+        if length_total <= 0:
+            raise ValueError('caption_length_weights must contain at least one positive value')
         self.random_scale: bool = kwargs.get('random_scale', False)
         self.random_crop: bool = kwargs.get('random_crop', False)
         self.resolution: int = kwargs.get('resolution', 512)
@@ -1131,6 +1156,14 @@ class DatasetConfig:
         self.cache_clip_vision_to_disk: bool = kwargs.get('cache_clip_vision_to_disk', False)
         self.cache_text_embeddings: bool = kwargs.get('cache_text_embeddings', False)
         self.load_image_when_caching_latents: bool = kwargs.get('load_image_when_caching_latents', False)
+        if self.caption_format == 'moss_json' and self.cache_text_embeddings and (
+            self.shuffle_caption or self.token_dropout_rate > 0 or self.random_triggers
+        ):
+            raise ValueError(
+                'MOSS JSON caption variants can be cached, but random tag augmentation cannot. '
+                'Disable cache_text_embeddings or set shuffle_caption=false, '
+                'token_dropout_rate=0 and random_triggers=[].'
+            )
 
         self.standardize_images: bool = kwargs.get('standardize_images', False)
 

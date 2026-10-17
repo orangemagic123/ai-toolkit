@@ -222,12 +222,39 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Caption Mode',
     description: (
       <>
-        Single mode uses the caption file matching the image name, such as <code>a.txt</code> for <code>a.png</code>.
+        With MOSS JSON, Single uses natural language and Mixed uses the four tag/natural-language variants from one
+        JSON file. Without regular tags it falls back to natural language. With Text format, Single mode uses the
+        caption file matching the image name, such as <code>a.txt</code> for <code>a.png</code>.
         Mixed mode also reads <code>a_nl.txt</code> and randomly chooses tags, natural language, tags followed by
         natural language, or natural language followed by tags whenever the image is loaded. Disable text embedding
-        caching so the selection can change during training. If the tags caption contains Keep Tokens Separator, its
+        caching for Text format so the selection can change during training. MOSS JSON caches every enabled variant.
+        If the tags caption contains Keep Tokens Separator, its
         protected prefix is placed first in every mixed variant, including the natural-language-only variant. Shuffle
         Caption and Caption Tag Dropout only process the tag section; the natural-language section remains unchanged.
+      </>
+    ),
+  },
+  'datasets.caption_format': {
+    title: 'Caption Format',
+    description: (
+      <>
+        MOSS JSON reads an image-matching JSON file with <code>caption.short</code>, <code>caption.medium</code>,
+        <code>caption.long</code>, and optional <code>tags</code> and <code>keep_tags</code> arrays. keep_tags remain
+        first, in their written order, in every variant, and are protected from tag dropout and shuffling. Metadata
+        such as watermark and borders is excluded from the training caption. Text / Raw JSON Prompt reads the whole
+        file verbatim. Selecting a JSON extension alone does not enable MOSS parsing.
+      </>
+    ),
+  },
+  'datasets.caption_length_weights': {
+    title: 'Natural Language Caption Length Weights',
+    description: (
+      <>
+        Relative weights for selecting short, medium, or long whenever a MOSS JSON variant includes natural language.
+        Values 10, 20, 70 select those lengths 10%, 20%, 70% of the time; the total does not need to be 100. Zero disables
+        a length. Defaults to equal weights. Every length must contain a non-empty string in the JSON. Enabled variants
+        are all precached when text embedding caching is on. Disable that cache to use tag shuffling, tag dropout, or
+        random triggers. Whole-caption dropout and protected-only dropout work with either encoding mode.
       </>
     ),
   },
