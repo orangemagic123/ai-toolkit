@@ -16,6 +16,8 @@ export const defaultDatasetConfig: DatasetConfig = {
   mask_min_value: 0.1,
   default_caption: '',
   caption_ext: 'txt',
+  caption_format: 'text',
+  caption_length_weights: { short: 1, medium: 1, long: 1 },
   caption_dropout_rate: 0.05,
   protected_caption_dropout_rate: 0,
   caption_mode: 'single',
@@ -201,12 +203,18 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
   }
 
   for (const dataset of processConfig.datasets ?? []) {
+    const lengthWeights = dataset.caption_length_weights;
+    dataset.caption_length_weights = lengthWeights
+      ? { short: lengthWeights.short ?? 0, medium: lengthWeights.medium ?? 0, long: lengthWeights.long ?? 0 }
+      : { short: 1, medium: 1, long: 1 };
     const existingWeights =
       dataset.mixed_weights && typeof dataset.mixed_weights === 'object' && !Array.isArray(dataset.mixed_weights)
         ? dataset.mixed_weights
         : {};
     dataset.mixed_weights = {
-      ...defaultMixedCaptionWeights,
+      ...(dataset.caption_format === 'moss_json' && dataset.mixed_weights
+        ? { tags: 0, nl: 0, tags_nl: 0, nl_tags: 0 }
+        : defaultMixedCaptionWeights),
       ...existingWeights,
     };
   }

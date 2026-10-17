@@ -116,6 +116,12 @@ export interface DatasetConfig {
   mask_min_value: number;
   default_caption: string;
   caption_ext: string;
+  caption_format?: 'text' | 'moss_json';
+  caption_length_weights?: {
+    short: number;
+    medium: number;
+    long: number;
+  };
   caption_dropout_rate: number;
   protected_caption_dropout_rate?: number;
   caption_mode?: 'single' | 'mixed';

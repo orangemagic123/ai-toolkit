@@ -446,7 +446,7 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 file_list.extend(os.path.join(root, file) for file in files if file.lower().endswith(tuple(extensions)) and not file.startswith('.'))
         else:
             # assume json
-            with open(self.dataset_path, 'r') as f:
+            with open(self.dataset_path, 'r', encoding='utf-8-sig') as f:
                 self.caption_dict = json.load(f)
                 # keys are file paths
                 file_list = list(self.caption_dict.keys())
@@ -640,6 +640,8 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
 
     def _get_single_item(self, index, _attempts=0) -> 'FileItemDTO':
         file_item: 'FileItemDTO' = copy.deepcopy(self.file_list[index])
+        # Select the caption before image processing loads its cached embedding.
+        file_item.load_caption(self.caption_dict)
         try:
             file_item.load_and_process_image(self.transform)
         except Exception as e:
@@ -649,7 +651,6 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
                 raise
             new_index = self._get_replacement_index(index)
             return self._get_single_item(new_index, _attempts=_attempts + 1)
-        file_item.load_caption(self.caption_dict)
         return file_item
 
     def __getitem__(self, item):
