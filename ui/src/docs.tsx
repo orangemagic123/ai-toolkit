@@ -71,6 +71,40 @@ const docs: { [key: string]: ConfigDoc } = {
       </>
     ),
   },
+  'network.nora': {
+    title: (
+      <>
+        NoRA{' '}
+        <span className="text-yellow-500">
+          ( <IoFlaskSharp className="inline text-yellow-500" name="Experimental" /> Experimental)
+        </span>
+      </>
+    ),
+    description: (
+      <>
+        Normalized Low-Rank Adaptation (
+        <a className="text-blue-500" href="https://arxiv.org/abs/2608.31036" target="_blank">
+          arXiv 2608.31036
+        </a>
+        ) scales every input column of the LoRA down projection to unit length along the rank dimension. LoRA only,
+        with or without DoRA.
+        <br />
+        <br />
+        <b>NoRA-init</b> normalizes the down projection once when a new adapter is created, then trains a regular
+        LoRA. <b>NoRA (continuous)</b> normalizes it in every forward pass. Saved files contain the normalized
+        weights, so both load anywhere a regular LoRA does.
+        <br />
+        <br />
+        The normalized down projection is much larger than the default LoRA initialization, which raises the
+        effective learning rate (the training log prints the factor). Do not reuse a LoRA learning rate as is: try
+        about 1x, 1/3 and 1/10 of it. Keep alpha equal to the rank.
+        <br />
+        <br />
+        A job cannot be resumed after switching between NoRA (continuous) and Off or NoRA-init; start a new job
+        instead. With DoRA, NoRA-init changes little because DoRA here already starts close to unit columns.
+      </>
+    ),
+  },
   'datasets.control_path': {
     title: 'Control Dataset',
     description: (

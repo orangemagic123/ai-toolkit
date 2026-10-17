@@ -8,6 +8,7 @@ import torch
 import torchaudio
 
 from toolkit.audio.album_artwork import add_album_artwork
+from toolkit.nora import NoraMode, parse_nora_mode
 from toolkit.prompt_utils import PromptEmbeds
 from torchao.quantization.quant_primitives import _DTYPE_TO_BIT_WIDTH
 
@@ -223,6 +224,16 @@ class NetworkConfig:
         self.conv_alpha: float = kwargs.get('conv_alpha', self.conv)
         self.dropout: Union[float, None] = kwargs.get('dropout', None)
         self.network_kwargs: dict = kwargs.get('network_kwargs', {})
+
+        # NoRA: normalize the LoRA down projection along the rank dim (toolkit/nora.py).
+        # network_kwargs are splatted into the network, which would silently ignore it.
+        if isinstance(self.network_kwargs, dict) and 'nora' in self.network_kwargs:
+            raise ValueError("Set nora directly under network, not under network.network_kwargs")
+        self.nora: NoraMode = parse_nora_mode(kwargs.get('nora', None))
+        if self.nora != 'off' and self.type.lower() != 'lora':
+            raise ValueError(
+                f"network.nora is only supported with type lora (with or without use_dora), got {self.type}"
+            )
 
         self.lorm_config: Union[LoRMConfig, None] = None
         lorm = kwargs.get('lorm', None)

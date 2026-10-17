@@ -14,6 +14,7 @@ from toolkit.models.lokr import LokrModule
 
 from .config_modules import NetworkConfig
 from .lorm import count_parameters
+from .nora import NORA_MODES, NoraMode, apply_nora_init_, nora_gain
 from .network_mixins import ToolkitNetworkMixin, ToolkitModuleMixin, ExtractableModuleMixin, broadcast_and_multiply
 
 from toolkit.kohya_lora import LoRANetwork
@@ -62,6 +63,7 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
             network: 'LoRASpecialNetwork' = None,
             use_bias: bool = False,
             is_ara: bool = False,
+            nora_mode: NoraMode = "off",
             **kwargs
     ):
         self.can_merge_in = True
@@ -121,6 +123,13 @@ class LoRAModule(ToolkitModuleMixin, ExtractableModuleMixin, torch.nn.Module):
         torch.nn.init.kaiming_uniform_(self.lora_down.weight, a=math.sqrt(5))
         if not self.full_rank:
             torch.nn.init.zeros_(self.lora_up.weight)
+
+        # continuous NoRA keeps this kaiming A as its raw weight (the paper's setting)
+        if nora_mode not in NORA_MODES or (nora_mode != "off" and self.full_rank):
+            raise ValueError(f"Unsupported NoRA mode {nora_mode!r} for {lora_name}")
+        self.nora_mode: NoraMode = nora_mode
+        if nora_mode == "init":
+            apply_nora_init_(self.lora_down.weight)
 
         self.multiplier: Union[float, List[float]] = multiplier
         # wrap the original module so it doesn't get weights updated
@@ -471,6 +480,18 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
             self.module_class = DoRAModule
             module_class = DoRAModule
 
+        self.nora_mode: NoraMode = getattr(self.network_config, "nora", "off") if self.network_config is not None else "off"
+        if self.nora_mode != "off" and (
+            self.network_type.lower() != "lora"
+            or self.full_rank
+            or is_lorm
+            or module_class not in (LoRAModule, DoRAModule)
+        ):
+            raise ValueError(
+                f"network.nora={self.nora_mode} needs LoRA or LoRA+DoRA modules, "
+                f"got network type {self.network_type} with {module_class.__name__}"
+            )
+
         self.peft_format = peft_format
         self.is_transformer = is_transformer
         
@@ -673,6 +694,9 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                             if self.is_ara:
                                 module_kwargs["is_ara"] = True
 
+                            if self.nora_mode != "off":
+                                module_kwargs["nora_mode"] = self.nora_mode
+
                             lora = module_class(
                                 lora_name,
                                 child_module,
@@ -790,6 +814,9 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
             assert lora.lora_name not in names, f"duplicated lora name: {lora.lora_name}"
             names.add(lora.lora_name)
 
+        if self.nora_mode != "off":
+            self._report_nora_modules()
+
         if self.full_train_in_out:
             print("full train in out")
             # we are going to retrain the main in out layers for VAE change usually
@@ -827,6 +854,29 @@ class LoRASpecialNetwork(ToolkitNetworkMixin, LoRANetwork):
                 self.unet_conv_out = copy.deepcopy(unet_conv_out)
                 unet.conv_in = self.unet_conv_in
                 unet.conv_out = self.unet_conv_out
+
+    def _report_nora_modules(self):
+        all_modules = self.get_all_modules()
+        nora_modules = [m for m in all_modules if getattr(m, "nora_mode", "off") != "off"]
+        if len(nora_modules) == 0:
+            raise ValueError(f"network.nora={self.nora_mode} was requested but no LoRA modules were created")
+        num_conv = sum(m.lora_down.weight.dim() == 4 for m in nora_modules)
+        gains = sorted(nora_gain(m.lora_down.weight) for m in nora_modules)
+        print(
+            f"NoRA ({self.nora_mode}): {len(nora_modules) - num_conv} Linear + {num_conv} Conv LoRA modules, "
+            f"{len(all_modules) - len(nora_modules)} full-weight modules unchanged"
+        )
+        # With AdamW, a down projection that is c times larger scales the effective
+        # up-projection learning rate by about c (and, for init, A's own by 1/c).
+        print(
+            f"  A column norm vs default LoRA init: x{gains[0]:.1f} min / x{gains[len(gains) // 2]:.1f} median / "
+            f"x{gains[-1]:.1f} max. Re-tune the learning rate instead of reusing the LoRA one (try 1x, 1/3, 1/10)."
+        )
+        if self.nora_mode == "continuous" and self.use_dora:
+            print("  DoRA raw A uses kaiming init (paper setting), not the default DoRA randn/sqrt(rank).")
+        scales = sorted({round(m.scale, 6) for m in nora_modules})
+        if scales != [1.0]:
+            print(f"  NoRA expects alpha == rank (scale 1), but module scales are {scales}.")
 
     def prepare_optimizer_params(self, text_encoder_lr, unet_lr, default_lr):
         # call Lora prepare_optimizer_params

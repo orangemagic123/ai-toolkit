@@ -227,6 +227,7 @@ export default function SimpleJob({
   const isLegacyDora = configuredNetworkType.toLowerCase() === 'dora';
   const networkType = isLegacyDora ? 'lora' : configuredNetworkType;
   const useDora = jobConfig.config.process[0].network?.use_dora ?? isLegacyDora;
+  const noraMode = jobConfig.config.process[0].network?.nora ?? 'off';
 
   const validationConfig = jobConfig.config.process[0].train.validation_config;
 
@@ -614,7 +615,13 @@ export default function SimpleJob({
             <SelectInput
               label="Target Type"
               value={networkType}
-              onChange={value => setJobConfig(value, 'config.process[0].network.type')}
+              onChange={value => {
+                setJobConfig(value, 'config.process[0].network.type');
+                // NoRA only applies to LoRA; the backend rejects it for other types
+                if (value !== 'lora' && noraMode !== 'off') {
+                  setJobConfig('off', 'config.process[0].network.nora');
+                }
+              }}
               options={[
                 { value: 'lora', label: 'LoRA' },
                 { value: 'lokr', label: 'LoKr' },
@@ -647,6 +654,17 @@ export default function SimpleJob({
             )}
             {networkType == 'lora' && (
               <>
+                <SelectInput
+                  label="NoRA"
+                  value={noraMode}
+                  onChange={value => setJobConfig(value, 'config.process[0].network.nora')}
+                  options={[
+                    { value: 'off', label: 'Off' },
+                    { value: 'init', label: 'NoRA-init' },
+                    { value: 'continuous', label: 'NoRA (continuous)' },
+                  ]}
+                  docKey="network.nora"
+                />
                 <NumberInput
                   label="Linear Rank"
                   value={jobConfig.config.process[0].network.linear}
