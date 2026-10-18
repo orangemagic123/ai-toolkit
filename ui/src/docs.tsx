@@ -222,8 +222,9 @@ const docs: { [key: string]: ConfigDoc } = {
     title: 'Caption Mode',
     description: (
       <>
-        With MOSS JSON, Single uses natural language and Mixed uses the four tag/natural-language variants from one
-        JSON file. Without regular tags it falls back to natural language. With Text format, Single mode uses the
+        With MOSS JSON, Natural Language uses one of the three caption lengths, Tags Only uses the tags, and Mixed
+        uses the four tag/natural-language variants from one JSON file. Without regular tags it falls back to natural
+        language using the configured length weights. With Text format, Single mode uses the
         caption file matching the image name, such as <code>a.txt</code> for <code>a.png</code>.
         Mixed mode also reads <code>a_nl.txt</code> and randomly chooses tags, natural language, tags followed by
         natural language, or natural language followed by tags whenever the image is loaded. Disable text embedding
@@ -255,6 +256,8 @@ const docs: { [key: string]: ConfigDoc } = {
         a length. Defaults to equal weights. Every length must contain a non-empty string in the JSON. Enabled variants
         are all precached when text embedding caching is on. Disable that cache to use tag shuffling, tag dropout, or
         random triggers. Whole-caption dropout and protected-only dropout work with either encoding mode.
+        The legacy short/long dual-caption training options require caching to be off; leave them disabled to use
+        these random length weights with caching.
       </>
     ),
   },

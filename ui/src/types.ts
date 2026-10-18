@@ -116,6 +116,9 @@ export interface DatasetConfig {
   mask_min_value: number;
   default_caption: string;
   caption_ext: string;
+  trigger_word?: string | null;
+  cache_text_embeddings?: boolean;
+  random_triggers?: string[] | string;
   caption_format?: 'text' | 'moss_json';
   caption_length_weights?: {
     short: number;
@@ -178,6 +181,8 @@ export interface ValidationConfig {
 }
 
 export interface TrainConfig {
+  short_and_long_captions?: boolean;
+  short_and_long_captions_encoder_split?: boolean;
   batch_size: number;
   bypass_guidance_embedding?: boolean;
   steps: number;

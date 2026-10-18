@@ -1678,6 +1678,16 @@ def validate_configs(
 
     # see if any datasets are caching text embeddings
     is_caching_text_embeddings = any(dataset.cache_text_embeddings for dataset in dataset_configs)
+    if is_caching_text_embeddings and any(
+        dataset.caption_format == 'moss_json' for dataset in dataset_configs
+    ) and (train_config.short_and_long_captions or train_config.short_and_long_captions_encoder_split):
+        # The trainer consumes one cached embedding per image. It cannot use
+        # that same embedding for the short-caption row or split XL encoders.
+        raise ValueError(
+            'MOSS JSON short_and_long_captions and short_and_long_captions_encoder_split '
+            'require cache_text_embeddings=false. Disable text embedding caching, '
+            'or disable both legacy options and use caption_length_weights instead.'
+        )
     if is_caching_text_embeddings:
         # make sure they are all cached
         for dataset in dataset_configs:

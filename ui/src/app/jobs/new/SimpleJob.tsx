@@ -1,12 +1,6 @@
 'use client';
 import { useMemo } from 'react';
-import {
-  ModelArch,
-  quantizationOptions,
-  defaultQtype,
-  jobTypeOptions,
-  SampleTags,
-} from './options';
+import { ModelArch, quantizationOptions, defaultQtype, jobTypeOptions, SampleTags } from './options';
 import { useModelArchs } from '@/extensions/modelArchs';
 import { defaultCompileOptions, defaultDatasetConfig } from './jobConfig';
 import { GroupedSelectOption, JobConfig, SelectOption } from '@/types';
@@ -32,6 +26,8 @@ import { FlipHorizontal2, FlipVertical2 } from 'lucide-react';
 import { handleModelArchChange } from './utils';
 import { IoFlaskSharp } from 'react-icons/io5';
 import { isMac } from '@/helpers/basic';
+import CaptionSettings from './CaptionSettings';
+import { captionSettingsErrors } from './captionConfig';
 
 const WARMUP_LR_SCHEDULERS = new Set(['constant_with_warmup', 'cosine_with_warmup']);
 
@@ -84,33 +80,9 @@ export default function SimpleJob({
 
   const isVideoModel = !!(modelArch?.group === 'video');
   const isAudioModel = !!(modelArch?.group === 'audio');
-  const hasInvalidMixedCaptionWeights = jobConfig.config.process[0].datasets.some(dataset => {
-    if ((dataset.caption_mode ?? 'single') !== 'mixed') return false;
-    const weights = dataset.mixed_weights;
-    return (
-      (weights?.tags ?? 40) +
-        (weights?.nl ?? 30) +
-        (weights?.tags_nl ?? 20) +
-        (weights?.nl_tags ?? 10) <=
-      0
-    );
-  });
-
   const handleValidatedSubmit = (event: React.FormEvent<HTMLFormElement>) => {
-    const hasInvalidLengthWeights = jobConfig.config.process[0].datasets.some(dataset => {
-      if (dataset.caption_format !== 'moss_json') return false;
-      const weights = dataset.caption_length_weights ?? { short: 1, medium: 1, long: 1 };
-      const values = [weights.short, weights.medium, weights.long];
-      return values.some(value => !Number.isFinite(value) || value < 0) || values.reduce((a, b) => a + b, 0) <= 0;
-    });
-    const hasInvalidJsonCacheOptions =
-      jobConfig.config.process[0].train.cache_text_embeddings &&
-      jobConfig.config.process[0].datasets.some(
-        dataset =>
-          dataset.caption_format === 'moss_json' &&
-          (dataset.shuffle_caption || (dataset.token_dropout_rate ?? 0) > 0),
-      );
-    if (hasInvalidMixedCaptionWeights || hasInvalidLengthWeights || hasInvalidJsonCacheOptions) {
+    const process = jobConfig.config.process[0];
+    if (process.datasets.some(dataset => captionSettingsErrors(dataset, process.train).length > 0)) {
       event.preventDefault();
       event.stopPropagation();
       return;
@@ -324,7 +296,13 @@ export default function SimpleJob({
               label="Model Architecture"
               value={jobConfig.config.process[0].model.arch}
               onChange={value => {
-                handleModelArchChange(modelArchs, jobConfig.config.process[0].model.arch, value, jobConfig, setJobConfig);
+                handleModelArchChange(
+                  modelArchs,
+                  jobConfig.config.process[0].model.arch,
+                  value,
+                  jobConfig,
+                  setJobConfig,
+                );
               }}
               options={groupedModelOptions}
             />
@@ -1414,131 +1392,11 @@ export default function SimpleJob({
                       />
                     </div>
                     <div>
-                      <TextInput
-                        label="Default Caption"
-                        value={dataset.default_caption}
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].default_caption`)}
-                        placeholder="eg. A photo of a cat"
+                      <CaptionSettings
+                        dataset={dataset}
+                        train={jobConfig.config.process[0].train}
+                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}]`)}
                       />
-                      <SelectInput
-                        label="Caption Format"
-                        className="pt-2"
-                        value={dataset.caption_format ?? 'text'}
-                        onChange={value => {
-                          setJobConfig(value, `config.process[0].datasets[${i}].caption_format`);
-                          if (value === 'moss_json') {
-                            setJobConfig('json', `config.process[0].datasets[${i}].caption_ext`);
-                          }
-                        }}
-                        options={[
-                          { value: 'text', label: 'Text / Raw JSON Prompt' },
-                          { value: 'moss_json', label: 'MOSS JSON (tags + captions + keep_tags)' },
-                        ]}
-                        docKey="datasets.caption_format"
-                      />
-                      <SelectInput
-                        label="Caption Mode"
-                        className="pt-2"
-                        value={dataset.caption_mode ?? 'single'}
-                        onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].caption_mode`)}
-                        options={[
-                          {
-                            value: 'single',
-                            label: dataset.caption_format === 'moss_json' ? 'Natural Language' : 'Single Caption',
-                          },
-                          { value: 'mixed', label: 'Mixed (Tags / Natural Language)' },
-                        ]}
-                        docKey="datasets.caption_mode"
-                      />
-                      {dataset.caption_format === 'moss_json' && (
-                        <>
-                          {(['short', 'medium', 'long'] as const).map(length => (
-                            <NumberInput
-                              key={length}
-                              label={`${length[0].toUpperCase() + length.slice(1)} Caption Weight`}
-                              className="pt-2"
-                              value={dataset.caption_length_weights?.[length] ?? 1}
-                              onChange={value =>
-                                setJobConfig(value, `config.process[0].datasets[${i}].caption_length_weights.${length}`)
-                              }
-                              min={0}
-                              required
-                              docKey="datasets.caption_length_weights"
-                            />
-                          ))}
-                          <p className="pt-2 text-sm text-gray-400">
-                            Relative weights when natural language is selected. keep_tags always stay first and in order.
-                          </p>
-                          {jobConfig.config.process[0].train.cache_text_embeddings &&
-                            (dataset.shuffle_caption || (dataset.token_dropout_rate ?? 0) > 0) && (
-                              <p className="pt-2 text-sm text-red-500">
-                                Disable text embedding caching to shuffle or drop caption tags.
-                              </p>
-                            )}
-                          {(dataset.caption_length_weights?.short ?? 1) +
-                            (dataset.caption_length_weights?.medium ?? 1) +
-                            (dataset.caption_length_weights?.long ?? 1) <= 0 && (
-                            <p className="pt-2 text-sm text-red-500">
-                              At least one caption length weight must be greater than 0.
-                            </p>
-                          )}
-                        </>
-                      )}
-                      {(dataset.caption_mode ?? 'single') === 'mixed' && (
-                        <>
-                          <NumberInput
-                            label="Tags Weight"
-                            className="pt-2"
-                            value={dataset.mixed_weights?.tags ?? 40}
-                            onChange={value =>
-                              setJobConfig(value, `config.process[0].datasets[${i}].mixed_weights.tags`)
-                            }
-                            min={0}
-                            docKey="datasets.mixed_weights"
-                            required
-                          />
-                          <NumberInput
-                            label="Natural Language Weight"
-                            className="pt-2"
-                            value={dataset.mixed_weights?.nl ?? 30}
-                            onChange={value => setJobConfig(value, `config.process[0].datasets[${i}].mixed_weights.nl`)}
-                            min={0}
-                            docKey="datasets.mixed_weights"
-                            required
-                          />
-                          <NumberInput
-                            label="Tags + Natural Language Weight"
-                            className="pt-2"
-                            value={dataset.mixed_weights?.tags_nl ?? 20}
-                            onChange={value =>
-                              setJobConfig(value, `config.process[0].datasets[${i}].mixed_weights.tags_nl`)
-                            }
-                            min={0}
-                            docKey="datasets.mixed_weights"
-                            required
-                          />
-                          <NumberInput
-                            label="Natural Language + Tags Weight"
-                            className="pt-2"
-                            value={dataset.mixed_weights?.nl_tags ?? 10}
-                            onChange={value =>
-                              setJobConfig(value, `config.process[0].datasets[${i}].mixed_weights.nl_tags`)
-                            }
-                            min={0}
-                            docKey="datasets.mixed_weights"
-                            required
-                          />
-                          {(dataset.mixed_weights?.tags ?? 40) +
-                            (dataset.mixed_weights?.nl ?? 30) +
-                            (dataset.mixed_weights?.tags_nl ?? 20) +
-                            (dataset.mixed_weights?.nl_tags ?? 10) <=
-                            0 && (
-                            <p className="pt-2 text-sm text-red-500">
-                              At least one mixed caption weight must be greater than 0.
-                            </p>
-                          )}
-                        </>
-                      )}
                       <NumberInput
                         label="Caption Dropout Rate"
                         className="pt-2"
@@ -1591,16 +1449,18 @@ export default function SimpleJob({
                         docKey="datasets.keep_tokens"
                         required
                       />
-                      <TextInput
-                        label="Keep Tokens Separator"
-                        className="pt-2"
-                        value={dataset.keep_tokens_separator ?? ''}
-                        onChange={value =>
-                          setJobConfig(value, `config.process[0].datasets[${i}].keep_tokens_separator`)
-                        }
-                        placeholder="eg. |||"
-                        docKey="datasets.keep_tokens_separator"
-                      />
+                      {dataset.caption_format !== 'moss_json' && (
+                        <TextInput
+                          label="Keep Tokens Separator"
+                          className="pt-2"
+                          value={dataset.keep_tokens_separator ?? ''}
+                          onChange={value =>
+                            setJobConfig(value, `config.process[0].datasets[${i}].keep_tokens_separator`)
+                          }
+                          placeholder="eg. |||"
+                          docKey="datasets.keep_tokens_separator"
+                        />
+                      )}
                       <TextInput
                         label="Secondary Separator"
                         className="pt-2"
