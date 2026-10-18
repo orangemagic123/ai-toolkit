@@ -1251,8 +1251,18 @@ export default function SimpleJob({
                   )}
                 </div>
                 <div>
+                  <Checkbox
+                    label="Pool Datasets"
+                    docKey={'train.pool_datasets'}
+                    className="pt-1"
+                    checked={jobConfig.config.process[0].train.pool_datasets || false}
+                    onChange={value => {
+                      setJobConfig(value ? true : undefined, 'config.process[0].train.pool_datasets');
+                    }}
+                  />
                   <NumberInput
                     label="Log Captions Every N Steps"
+                    className="pt-2"
                     value={jobConfig.config.process[0].logging.log_captions_every_n_steps ?? 0}
                     onChange={value =>
                       setJobConfig(Math.floor(value ?? 0), 'config.process[0].logging.log_captions_every_n_steps')

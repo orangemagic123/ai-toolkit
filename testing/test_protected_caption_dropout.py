@@ -138,6 +138,8 @@ class FakeItem(NAMESPACE['CaptionProcessingDTOMixin'], NAMESPACE['TextEmbeddingF
         self.control_path = None
         self.control_video_paths = []
         self.is_video = False
+        # FileItemDTO keeps its source dataset's transform (pooled datasets)
+        self.dataloader_transforms = None
 
     def load_caption(self):
         # the parts of the real load_caption the text embedding cache relies on

@@ -233,13 +233,14 @@ class MossJsonCaptionTest(unittest.TestCase):
             schema.with_suffix('.json').write_text(json.dumps({'caption': 'text'}), encoding='utf-8')
             items = [JsonItem(path) for path in (good, missing, broken, schema)]
             with self.assertRaisesRegex(ValueError, '3 MOSS caption JSON') as raised:
-                ValidatingDataset(items).load_structured_captions()
+                ValidatingDataset(items).load_structured_captions(items)
             message = str(raised.exception)
             for name in ('missing.json', 'broken.json', 'schema.json'):
                 self.assertIn(name, message)
             self.assertNotIn('image.json', message)
         with self.assertRaisesRegex(ValueError, 'aggregate.png'):
-            ValidatingDataset([JsonItem('aggregate.png')], {'aggregate.png': {'caption': {}}}).load_structured_captions()
+            items = [JsonItem('aggregate.png')]
+            ValidatingDataset(items, {'aggregate.png': {'caption': {}}}).load_structured_captions(items)
 
     def test_validated_captions_are_reused_by_repeats_and_samples(self):
         with TemporaryDirectory() as folder:
@@ -248,20 +249,22 @@ class MossJsonCaptionTest(unittest.TestCase):
             items = [JsonItem(image) for _ in range(3)]
             dataset = ValidatingDataset(items)
             with patch('builtins.open', wraps=open) as opened:
-                dataset.load_structured_captions()
+                dataset.load_structured_captions(items)
                 loaded = [GET_SINGLE_ITEM(dataset, index) for index in range(3) for _ in range(2)]
             self.assertEqual(opened.call_count, 1)
             self.assertIs(items[0].structured_caption_source, items[2].structured_caption_source)
             self.assertTrue(all(item.caption.startswith('mychar, portrait') for item in loaded))
 
-    def test_dataset_init_validates_before_flip_copies(self):
-        init = dataset_method_node('__init__')
-        calls = [node.lineno for node in ast.walk(init) if isinstance(node, ast.Call)
+    def test_each_dataset_source_is_validated_before_flip_copies(self):
+        scan = dataset_method_node('_scan_source')
+        calls = [node for node in ast.walk(scan) if isinstance(node, ast.Call)
                  and getattr(node.func, 'attr', None) == 'load_structured_captions']
-        flips = [node.lineno for node in ast.walk(init) if isinstance(node, ast.Attribute)
+        flips = [node.lineno for node in ast.walk(scan) if isinstance(node, ast.Attribute)
                  and node.attr in ('flip_x', 'flip_y')]
         self.assertEqual(len(calls), 1)
-        self.assertLess(calls[0], min(flips))
+        self.assertLess(calls[0].lineno, min(flips))
+        # Validate this source's new items; they join self.file_list only at the end.
+        self.assertEqual([ast.unparse(arg) for arg in calls[0].args], ['source_items'])
 
     def test_all_cached_variants_and_preservation_match_selected_caption(self):
         with TemporaryDirectory() as folder:
