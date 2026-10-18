@@ -567,6 +567,11 @@ class AiToolkitDataset(LatentCachingMixin, ControlCachingMixin, CLIPCachingMixin
             print_acc(f"  -  Found {len(self.file_list)} images")
             assert len(self.file_list) > 0, f"no images found in {self.dataset_path}"
 
+        if self.dataset_config.caption_format == 'moss_json':
+            # Before flips, so flipped copies reuse the parsed captions.
+            print_acc("  -  Validating MOSS caption JSON")
+            self.load_structured_captions()
+
         # handle x axis flips
         if self.dataset_config.flip_x:
             print_acc("  -  adding x axis flips")

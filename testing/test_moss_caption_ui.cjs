@@ -125,6 +125,16 @@ for (const weights of [{ short: 0, medium: 0, long: 0 }, { short: -1 }, { short:
 }
 formDataset.caption_length_weights = { short: 0, medium: 0, long: 0 };
 assert.ok(elements(render()).some(node => node.props?.role === 'alert'), 'Invalid settings must show a visible error');
+// Leaving MOSS JSON must not keep reading annotation files as raw text prompts.
+for (const ext of ['json', '.json', 'JSON']) {
+  const back = captionConfig.setCaptionFormat({ ...formDataset, caption_ext: ext }, 'text');
+  assert.equal(back.caption_ext, 'txt', `caption_ext ${ext} must reset to txt`);
+}
+assert.equal(captionConfig.setCaptionFormat({ ...formDataset, caption_ext: 'caption' }, 'text').caption_ext, 'caption');
+const rawJsonText = { ...clone(defaultDatasetConfig), caption_ext: 'json' };
+assert.equal(captionConfig.setCaptionFormat(rawJsonText, 'text').caption_ext, 'json', 'text + raw JSON stays as is');
+control('Caption Format').onChange('text');
+assert.equal(formDataset.caption_ext, 'txt');
 console.log('MOSS JSON UI config: defaults, partial weights, and save/load round trips passed.');
 console.log('MOSS JSON GUI: format, content modes, weights, trigger, and validation handlers passed.');
 

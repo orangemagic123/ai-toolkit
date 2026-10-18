@@ -190,6 +190,25 @@ class CaptionMixin:
 
         return prompt
 
+    def load_structured_captions(self: 'AiToolkitDataset'):
+        """Validate every MOSS JSON at startup instead of when a sample is drawn."""
+        sources = {}
+        errors = []
+        for file_item in self.file_list:
+            # Repeated items share one path; read each file only once.
+            if file_item.path not in sources:
+                try:
+                    sources[file_item.path] = file_item.load_structured_caption_source(self.caption_dict)
+                except ValueError as exc:
+                    sources[file_item.path] = None
+                    errors.append(str(exc))
+            file_item.structured_caption_source = sources[file_item.path]
+        if errors:
+            shown = '\n'.join(f'  - {error}' for error in errors[:20])
+            if len(errors) > 20:
+                shown += f'\n  ... and {len(errors) - 20} more'
+            raise ValueError(f'{len(errors)} MOSS caption JSON file(s) are missing or invalid:\n{shown}')
+
 
 if TYPE_CHECKING:
     from toolkit.config_modules import DatasetConfig
@@ -346,21 +365,26 @@ class CaptionProcessingDTOMixin:
             self.extra_values: List[float] = dataset_config.extra_values
             self.trigger_word = dataset_config.trigger_word
 
+    def load_structured_caption_source(self: 'FileItemDTO', caption_dict: Union[dict, None]=None):
+        """Read and validate this item's MOSS JSON once; later loads reuse it."""
+        if getattr(self, 'structured_caption_source', None) is None:
+            if caption_dict is not None and self.path in caption_dict:
+                value = caption_dict[self.path]
+                source = self.path
+            else:
+                source = os.path.splitext(self.path)[0] + self.dataset_config.caption_ext
+                try:
+                    with open(source, 'r', encoding='utf-8-sig') as f:
+                        value = json.load(f)
+                except (OSError, ValueError) as exc:
+                    raise ValueError(f'Unable to read MOSS caption JSON {source}: {exc}') from exc
+            self.structured_caption_source = parse_structured_caption(value, source)
+        return self.structured_caption_source
+
     # todo allow for loading from sd-scripts style dict
     def load_caption(self: 'FileItemDTO', caption_dict: Union[dict, None]=None):
         if getattr(self.dataset_config, 'caption_format', 'text') == 'moss_json':
-            if getattr(self, 'structured_caption_source', None) is None:
-                if caption_dict is not None and self.path in caption_dict:
-                    value = caption_dict[self.path]
-                    source = self.path
-                else:
-                    source = os.path.splitext(self.path)[0] + self.dataset_config.caption_ext
-                    try:
-                        with open(source, 'r', encoding='utf-8-sig') as f:
-                            value = json.load(f)
-                    except (OSError, ValueError) as exc:
-                        raise ValueError(f'Unable to read MOSS caption JSON {source}: {exc}') from exc
-                self.structured_caption_source = parse_structured_caption(value, source)
+            self.load_structured_caption_source(caption_dict)
             self._set_structured_caption_selection(self.structured_caption_source.select(
                 self.dataset_config.caption_mode,
                 self.dataset_config.mixed_weights,

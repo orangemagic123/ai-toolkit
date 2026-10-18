@@ -243,7 +243,9 @@ const docs: { [key: string]: ConfigDoc } = {
         <code>caption.long</code>, and optional <code>tags</code> and <code>keep_tags</code> arrays. keep_tags remain
         first, in their written order, in every variant, and are protected from tag dropout and shuffling. Metadata
         such as watermark and borders is excluded from the training caption. Text / Raw JSON Prompt reads the whole
-        file verbatim. Selecting a JSON extension alone does not enable MOSS parsing.
+        file verbatim. Selecting a JSON extension alone does not enable MOSS parsing. Every image needs a matching
+        JSON; all files are checked when the dataset loads, and missing or malformed files stop the job before
+        training starts. Switching from MOSS JSON back to Text resets a json Caption Extension to txt.
       </>
     ),
   },

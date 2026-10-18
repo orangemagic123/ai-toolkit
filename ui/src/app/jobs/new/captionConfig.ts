@@ -17,11 +17,18 @@ export function mixedCaptionWeights(dataset: DatasetConfig) {
     : { ...mixedCaptionDefaults };
 }
 
+function isJsonExtension(extension: string | undefined) {
+  return (extension ?? '').replace(/^\./, '').toLowerCase() === 'json';
+}
+
 export function setCaptionFormat(dataset: DatasetConfig, format: 'text' | 'moss_json'): DatasetConfig {
+  // Undo the json extension MOSS JSON set; text mode would read the annotation as a raw prompt.
+  const leavingMoss = format === 'text' && dataset.caption_format === 'moss_json';
   return {
     ...dataset,
     caption_format: format,
-    caption_ext: format === 'moss_json' ? 'json' : dataset.caption_ext,
+    caption_ext:
+      format === 'moss_json' ? 'json' : leavingMoss && isJsonExtension(dataset.caption_ext) ? 'txt' : dataset.caption_ext,
     caption_length_weights: captionLengthWeights(dataset),
     mixed_weights: mixedCaptionWeights(dataset),
   };
