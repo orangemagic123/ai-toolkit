@@ -10,12 +10,20 @@ from unittest.mock import patch
 
 from toolkit.caption_utils import parse_structured_caption
 from testing.test_protected_caption_dropout import (
-    DATASET_CONFIG, FakeDataset, FakeItem, NAMESPACE, ROOT,
+    DATASET_CONFIG, FakeDataset, FakeItem, NAMESPACE, ROOT, _load_definitions,
 )
 
 
 NAMESPACE['parse_structured_caption'] = parse_structured_caption
 NAMESPACE['clean_caption'] = lambda caption: caption
+_load_definitions('toolkit/dataloader_mixins.py', {'CaptionMixin'}, NAMESPACE)
+
+
+class ValidatingDataset(NAMESPACE['CaptionMixin']):
+    def __init__(self, file_list, caption_dict=None):
+        self.file_list = file_list
+        self.caption_dict = caption_dict
+        self.transform = None
 
 
 class JsonItem(FakeItem):
@@ -56,11 +64,16 @@ def write_caption(folder, value=None):
     return image
 
 
-def load_single_item_method():
+def dataset_method_node(name):
     source = ROOT / 'toolkit' / 'data_loader.py'
     tree = ast.parse(source.read_text(encoding='utf-8'))
     cls = next(node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == 'AiToolkitDataset')
-    method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == '_get_single_item')
+    return next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == name)
+
+
+def load_single_item_method():
+    source = ROOT / 'toolkit' / 'data_loader.py'
+    method = dataset_method_node('_get_single_item')
     namespace = {'copy': copy}
     exec(compile(ast.Module(body=[method], type_ignores=[]), str(source), 'exec'), namespace)
     return namespace['_get_single_item']
@@ -209,6 +222,46 @@ class MossJsonCaptionTest(unittest.TestCase):
                     image.with_suffix('.json').write_text(contents, encoding='utf-8')
                 with self.assertRaisesRegex(ValueError, 'missing.json'):
                     JsonItem(image).load_caption()
+
+    def test_dataset_reports_every_bad_json_before_training(self):
+        with TemporaryDirectory() as folder:
+            good = write_caption(folder)
+            missing = Path(folder) / 'missing.png'
+            broken = Path(folder) / 'broken.png'
+            broken.with_suffix('.json').write_text('{broken JSON', encoding='utf-8')
+            schema = Path(folder) / 'schema.png'
+            schema.with_suffix('.json').write_text(json.dumps({'caption': 'text'}), encoding='utf-8')
+            items = [JsonItem(path) for path in (good, missing, broken, schema)]
+            with self.assertRaisesRegex(ValueError, '3 MOSS caption JSON') as raised:
+                ValidatingDataset(items).load_structured_captions()
+            message = str(raised.exception)
+            for name in ('missing.json', 'broken.json', 'schema.json'):
+                self.assertIn(name, message)
+            self.assertNotIn('image.json', message)
+        with self.assertRaisesRegex(ValueError, 'aggregate.png'):
+            ValidatingDataset([JsonItem('aggregate.png')], {'aggregate.png': {'caption': {}}}).load_structured_captions()
+
+    def test_validated_captions_are_reused_by_repeats_and_samples(self):
+        with TemporaryDirectory() as folder:
+            image = write_caption(folder)
+            # num_repeats creates separate items for the same file.
+            items = [JsonItem(image) for _ in range(3)]
+            dataset = ValidatingDataset(items)
+            with patch('builtins.open', wraps=open) as opened:
+                dataset.load_structured_captions()
+                loaded = [GET_SINGLE_ITEM(dataset, index) for index in range(3) for _ in range(2)]
+            self.assertEqual(opened.call_count, 1)
+            self.assertIs(items[0].structured_caption_source, items[2].structured_caption_source)
+            self.assertTrue(all(item.caption.startswith('mychar, portrait') for item in loaded))
+
+    def test_dataset_init_validates_before_flip_copies(self):
+        init = dataset_method_node('__init__')
+        calls = [node.lineno for node in ast.walk(init) if isinstance(node, ast.Call)
+                 and getattr(node.func, 'attr', None) == 'load_structured_captions']
+        flips = [node.lineno for node in ast.walk(init) if isinstance(node, ast.Attribute)
+                 and node.attr in ('flip_x', 'flip_y')]
+        self.assertEqual(len(calls), 1)
+        self.assertLess(calls[0], min(flips))
 
     def test_all_cached_variants_and_preservation_match_selected_caption(self):
         with TemporaryDirectory() as folder:
