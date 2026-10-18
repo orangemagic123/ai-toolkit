@@ -17,6 +17,7 @@ export const defaultDatasetConfig: DatasetConfig = {
   default_caption: '',
   caption_ext: 'txt',
   caption_format: 'text',
+  trigger_word: null,
   caption_length_weights: { short: 1, medium: 1, long: 1 },
   caption_dropout_rate: 0.05,
   protected_caption_dropout_rate: 0,
@@ -203,6 +204,8 @@ export const migrateJobConfig = (jobConfig: JobConfig): JobConfig => {
   }
 
   for (const dataset of processConfig.datasets ?? []) {
+    dataset.caption_format ??= 'text';
+    dataset.caption_ext ??= dataset.caption_format === 'moss_json' ? 'json' : 'txt';
     const lengthWeights = dataset.caption_length_weights;
     dataset.caption_length_weights = lengthWeights
       ? { short: lengthWeights.short ?? 0, medium: lengthWeights.medium ?? 0, long: lengthWeights.long ?? 0 }

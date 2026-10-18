@@ -1166,6 +1166,12 @@ class BaseSDTrainProcess(BaseTrainProcess):
             with self.timer('prepare_prompt'):
                 prompts = batch.get_caption_list()
                 is_reg_list = batch.get_is_reg_list()
+                # Dataset triggers take precedence over the process trigger,
+                # matching the caption loader and text embedding cache.
+                prompt_triggers = [
+                    item.trigger_word if item.trigger_word is not None else self.trigger_word
+                    for item in batch.file_items
+                ]
 
                 is_any_reg = any([is_reg for is_reg in is_reg_list])
 
@@ -1177,13 +1183,15 @@ class BaseSDTrainProcess(BaseTrainProcess):
                     # double batch and add short captions to the end
                     prompts = prompts + batch.get_caption_short_list()
                     is_reg_list = is_reg_list + is_reg_list
+                    prompt_triggers = prompt_triggers + prompt_triggers
                 if self.model_config.refiner_name_or_path is not None and self.train_config.train_unet:
                     prompts = prompts + prompts
                     is_reg_list = is_reg_list + is_reg_list
+                    prompt_triggers = prompt_triggers + prompt_triggers
 
                 conditioned_prompts = []
 
-                for prompt, is_reg in zip(prompts, is_reg_list):
+                for prompt, is_reg, prompt_trigger in zip(prompts, is_reg_list, prompt_triggers):
 
                     # make sure the embedding is in the prompts
                     if self.embedding is not None:
@@ -1201,10 +1209,10 @@ class BaseSDTrainProcess(BaseTrainProcess):
                         )
 
                     # make sure trigger is in the prompts if not a regularization run
-                    if self.trigger_word is not None:
+                    if prompt_trigger is not None:
                         prompt = self.sd.inject_trigger_into_prompt(
                             prompt,
-                            trigger=self.trigger_word,
+                            trigger=prompt_trigger,
                             add_if_not_present=not is_reg,
                         )
 

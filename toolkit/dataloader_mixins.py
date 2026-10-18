@@ -456,7 +456,7 @@ class CaptionProcessingDTOMixin:
         self.mixed_caption_selection = selection
         self.mixed_caption_sources = None
         self.raw_caption = selection.render()
-        self.raw_caption_short = None
+        self.raw_caption_short = self.structured_caption_source.short_selection().render()
         self.caption_short = None
         # The next load must use the selected caption's embedding, including its
         # preservation/dropout variants, rather than a previously memoized path.
@@ -480,9 +480,11 @@ class CaptionProcessingDTOMixin:
             to_replace_list=None,
             add_if_not_present=False,
             drop_unprotected=False,
+            selection=None,
     ):
         """Process only the tag section of a selected mixed caption."""
-        selection = self.mixed_caption_selection
+        if selection is None:
+            selection = self.mixed_caption_selection
         protected_tags = selection.protected_tags
         if drop_unprotected:
             # Every variant collapses to the protected tags, so the result does not
@@ -638,9 +640,21 @@ class CaptionProcessingDTOMixin:
                 # protected-only rates exclusive.
                 rand = random.random()
                 if rand < blank_rate:
-                    # drop the caption
-                    return ''
+                    # Match cached dropout, including a dataset-only trigger.
+                    # Retain the effective dataset trigger in both paths.
+                    return inject_trigger_into_prompt(
+                        '', trigger, to_replace_list, add_if_not_present,
+                    )
                 drop_unprotected = rand < blank_rate + protected_rate
+
+        if short_caption and getattr(self, 'structured_caption_source', None) is not None:
+            # Keep natural language intact: the legacy text path shuffles
+            # comma-separated text, which would split the short sentence.
+            return self._get_mixed_caption(
+                trigger, to_replace_list, add_if_not_present,
+                drop_unprotected=drop_unprotected,
+                selection=self.structured_caption_source.short_selection(),
+            )
 
         if self.mixed_caption_selection is not None and not short_caption:
             return self._get_mixed_caption(
@@ -2555,8 +2569,7 @@ class TextEmbeddingFileItemDTOMixin:
         return self._dop_text_embedding_path
 
     def get_dropout_caption(self: 'FileItemDTO'):
-        # when encoding live, dropped captions still get the trigger word injected
-        # downstream (add_if_not_present when not a reg image), so match that here
+        # Match the live caption loader's dataset trigger policy.
         if self.trigger_word is not None and not self.is_reg:
             return inject_trigger_into_prompt('', trigger=self.trigger_word, add_if_not_present=True)
         return ''
@@ -2751,7 +2764,7 @@ class TextEmbeddingCachingMixin:
                 continue
             fields = (
                 'mixed_caption_selection', 'raw_caption', 'caption',
-                'caption_dop', 'caption_dopsd',
+                'raw_caption_short', 'caption_short', 'caption_dop', 'caption_dopsd',
             )
             saved = {name: getattr(file_item, name, None) for name in fields}
             was_cached = file_item.is_text_embedding_cached

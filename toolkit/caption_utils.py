@@ -101,6 +101,10 @@ class StructuredCaption:
             is_structured=True,
         )
 
+    def short_selection(self):
+        """The explicit short caption for legacy dual-caption training."""
+        return self._selection('nl', 'short')
+
     def select(self, mode, mixed_weights, length_weights):
         variants = self._variants(mode, mixed_weights)
         variant = variants[0] if len(variants) == 1 else random.choices(
