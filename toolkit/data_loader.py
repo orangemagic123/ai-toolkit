@@ -15,6 +15,8 @@ from PIL import Image
 from PIL.ImageOps import exif_transpose
 from torchvision import transforms
 from torch.utils.data import Dataset, DataLoader, ConcatDataset
+
+from toolkit.style_character_balance import build_balanced_sampler
 from tqdm import tqdm
 import albumentations as A
 
@@ -727,6 +729,7 @@ def get_dataloader_from_datasets(
         batch_size=1,
         sd: 'StableDiffusion' = None,
         pool_datasets: bool = False,
+        style_character_balance=None,
 ) -> DataLoader:
     if dataset_options is None or len(dataset_options) == 0:
         return None
@@ -778,6 +781,11 @@ def get_dataloader_from_datasets(
 
     concatenated_dataset = ConcatDataset(datasets)
 
+    # replaces shuffle with weighted draws; None when the option is off
+    sampler = build_balanced_sampler(
+        datasets, len(concatenated_dataset), style_character_balance, log=print_acc,
+    )
+
     # todo build scheduler that can get buckets from all datasets that match
     # todo and evenly distribute reg images
 
@@ -821,7 +829,8 @@ def get_dataloader_from_datasets(
             concatenated_dataset,
             batch_size=None,  # we batch in the datasets for now
             drop_last=False,
-            shuffle=True,
+            shuffle=sampler is None,
+            sampler=sampler,
             collate_fn=dto_collation,  # Use the custom collate function
             **dataloader_kwargs
         )
@@ -836,7 +845,8 @@ def get_dataloader_from_datasets(
         data_loader = DataLoader(
             concatenated_dataset,
             batch_size=batch_size,
-            shuffle=True,
+            shuffle=sampler is None,
+            sampler=sampler,
             collate_fn=dto_collation,
             **dataloader_kwargs
         )
