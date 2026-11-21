@@ -10,6 +10,7 @@ import torchaudio
 from toolkit.audio.album_artwork import add_album_artwork
 from toolkit.nora import NoraMode, parse_nora_mode
 from toolkit.prompt_utils import PromptEmbeds
+from toolkit.style_character_balance import StyleCharacterBalanceConfig
 from torchao.quantization.quant_primitives import _DTYPE_TO_BIT_WIDTH
 
 ImgExt = Literal['jpg', 'png', 'webp']
@@ -621,6 +622,10 @@ class TrainConfig:
         # merge all datasets into one file list so buckets/batches mix across folders;
         # reg datasets pool separately from non-reg ones
         self.pool_datasets: bool = kwargs.get('pool_datasets', False)
+        # reweight sampling so concept tags (characters, ...) stop predicting the style tag.
+        # parsed here so a typo in the options fails before any model loads
+        self.style_character_balance: Optional[StyleCharacterBalanceConfig] = \
+            StyleCharacterBalanceConfig.from_value(kwargs.get('style_character_balance', None))
         # for swapping which parameters are trained during training
         self.do_paramiter_swapping = kwargs.get('do_paramiter_swapping', False)
         # 0.1 is 10% of the parameters active at a time lower is less vram, higher is more
